@@ -1,5 +1,6 @@
 """
 services/downloader.py - Decoupled background download manager for 3D digital assets.
+Supports OAuth 2.0 Bearer authenticated downloads, live URL hydration, and dual-tier staging.
 """
 
 from datetime import datetime
@@ -72,12 +73,13 @@ class PathSanitizer:
         has_pre = bool(re.match(r"^\[\d+(?:\.\d+)?\s*(?:MB|KB|GB|B)\]\s*", filename, re.IGNORECASE))
         has_suf = bool(re.search(r"_\d+(?:\.\d+)?\s*(?:MB|KB|GB|B)$", stem, re.IGNORECASE))
 
-        clean = filename
+        clean_stem = stem
         if has_pre:
-            clean = re.sub(r"^\[\d+(?:\.\d+)?\s*(?:MB|KB|GB|B)\]\s*", "", clean)
+            clean_stem = re.sub(r"^\[\d+(?:\.\d+)?\s*(?:MB|KB|GB|B)\]\s*", "", clean_stem)
         if has_suf:
-            clean_stem = re.sub(r"_\d+(?:\.\d+)?\s*(?:MB|KB|GB|B)$", "", stem)
-            clean = f"{clean_stem}.{p.suffix.lstrip('.')}"
+            clean_stem = re.sub(r"_\d+(?:\.\d+)?\s*(?:MB|KB|GB|B)$", "", clean_stem)
+
+        clean = f"{clean_stem}{p.suffix}" if p.suffix else clean_stem
 
         return clean, has_pre, has_suf, ext
 
@@ -216,6 +218,7 @@ class StorageManager:
 
         return metrics
 
+
 class DownloadManager:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -237,6 +240,7 @@ class DownloadManager:
         self.stream_chunk_size = STREAM_CHUNK_SIZE_DEFAULT
         self.offload_chunk_size = OFFLOAD_CHUNK_SIZE_DEFAULT
         self.cookies: Dict[str, str] = {}
+        self.access_token: str = ""
 
         self._ensure_schema_columns()
         self._load_settings()
@@ -246,7 +250,6 @@ class DownloadManager:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 45000;")
         return conn
-
 
     def dequeue_models(self, model_ids: List[int]) -> int:
         """Removes models from the download queue, protecting actively downloading or completed jobs."""
@@ -292,12 +295,21 @@ class DownloadManager:
         work_dir.mkdir(parents=True, exist_ok=True)
         part_path = work_dir / f"{file_id}.part"
 
+        req_headers = dict(headers)
+        if self.access_token and "Authorization" not in req_headers:
+            req_headers["Authorization"] = f"Bearer {self.access_token}"
+
         for attempt in range(1, 3):
             try:
-                with httpx.Client(headers=headers, cookies=cookies, follow_redirects=True, timeout=30.0) as client:
+                with httpx.Client(headers=req_headers, cookies=cookies, follow_redirects=True, timeout=30.0) as client:
                     with client.stream("GET", download_url) as resp:
                         if resp.status_code in (401, 403):
-                            self.trip_circuit_breaker(f"Cloudflare auth failure (HTTP {resp.status_code})")
+                            reason = (
+                                f"OAuth authentication failure (HTTP {resp.status_code})"
+                                if self.access_token else
+                                f"Cloudflare auth failure (HTTP {resp.status_code})"
+                            )
+                            self.trip_circuit_breaker(reason)
                             with self._get_db() as conn:
                                 with conn:
                                     conn.execute("UPDATE app_settings SET value = '1' WHERE key = 'circuit_breaker_tripped';")
@@ -402,12 +414,14 @@ class DownloadManager:
         return False
 
     def _ensure_schema_columns(self):
-        """Ensures destination logging and SHA-256 checksum columns exist in SQLite."""
+        """Ensures destination logging, checksum, and archive download columns exist in SQLite."""
         with self._get_db() as conn:
             with conn:
                 m_cols = {r[1] for r in conn.execute("PRAGMA table_info(models);").fetchall()}
                 if "vault_path" not in m_cols:
                     conn.execute("ALTER TABLE models ADD COLUMN vault_path TEXT;")
+                if "archive_download_url" not in m_cols:
+                    conn.execute("ALTER TABLE models ADD COLUMN archive_download_url TEXT;")
 
                 dj_cols = {r[1] for r in conn.execute("PRAGMA table_info(download_jobs);").fetchall()}
                 if "destination_path" not in dj_cols:
@@ -434,6 +448,8 @@ class DownloadManager:
 
             offload_mb = float(settings.get("offload_chunk_size_mb", 4.0))
             self.offload_chunk_size = max(256 * 1024, int(offload_mb * 1024 * 1024))
+
+            self.access_token = settings.get("mmf_access_token", "").strip()
 
             raw_cookies = settings.get("cookies_json", "{}").strip()
             try:
@@ -487,7 +503,8 @@ class DownloadManager:
             self.offloader_workers.append(t)
             t.start()
 
-        print(f"[DownloadManager] Started {self.worker_concurrency} download workers and {self.offloader_concurrency} NAS offloaders.")
+        auth_mode = "OAuth Bearer Token" if self.access_token else "Cookie Fallback"
+        print(f"[DownloadManager] Started {self.worker_concurrency} download workers ({auth_mode}) and {self.offloader_concurrency} NAS offloaders.")
 
     def stop(self):
         self.is_running = False
@@ -586,16 +603,80 @@ class DownloadManager:
 
     def _process_download_to_staging(self, worker_id: int, job: sqlite3.Row, work_dir: Path):
         model_id = job["model_id"]
+
+        # --- PRE-DOWNLOAD OAUTH REFRESH: Fetch live authenticated URLs ---
+        if self.access_token:
+            api_url = f"https://www.myminifactory.com/api/v2/objects/{model_id}"
+            auth_headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            }
+            try:
+                with httpx.Client(timeout=15.0, follow_redirects=True) as meta_client:
+                    resp = meta_client.get(api_url, headers=auth_headers)
+                    if resp.status_code == 200:
+                        obj_data = resp.json()
+                        archive_dl_url = obj_data.get("archive_download_url")
+
+                        remote_files = (
+                            obj_data.get("files", {}).get("items", [])
+                            if isinstance(obj_data.get("files"), dict)
+                            else (obj_data.get("files") or [])
+                        )
+
+                        with self._get_db() as conn:
+                            with conn:
+                                if archive_dl_url:
+                                    conn.execute(
+                                        "UPDATE models SET archive_download_url = ? WHERE id = ?;",
+                                        (archive_dl_url, model_id),
+                                    )
+                                for rf in remote_files:
+                                    rf_id = rf.get("id")
+                                    rf_url = rf.get("download_url")
+                                    rf_size = rf.get("size")
+                                    if rf_id and rf_url:
+                                        conn.execute("""
+                                            UPDATE model_files
+                                            SET download_url = ?,
+                                                size_bytes = COALESCE(?, size_bytes)
+                                            WHERE file_id = ?;
+                                        """, (rf_url, rf_size, rf_id))
+                    elif resp.status_code == 401:
+                        self.trip_circuit_breaker("MyMiniFactory OAuth token expired (HTTP 401). Please re-authenticate in Settings.")
+                        raise RuntimeError("OAuth token expired (HTTP 401)")
+            except httpx.RequestError as req_err:
+                print(f"[DownloadWorker {worker_id}] Notice: Could not refresh live OAuth metadata for Model #{model_id}: {req_err}")
+
         with self._get_db() as conn:
             files = conn.execute("""
                 SELECT mf.file_id, mf.filename, mf.download_url, mf.size_bytes
                 FROM model_files mf WHERE mf.model_id = ?;
             """, (model_id,)).fetchall()
 
+            # Fallback: Adopt archive_download_url as synthetic ZIP file if no separate file items exist
+            if not files:
+                m_row = conn.execute("SELECT name, archive_download_url FROM models WHERE id = ?;", (model_id,)).fetchone()
+                if m_row and m_row["archive_download_url"]:
+                    clean_m = sanitize_segment(m_row["name"] or f"Model_{model_id}")
+                    archive_filename = f"{model_id}_{clean_m}.zip"
+                    synth_file_id = model_id * 1000 + 1
+                    with conn:
+                        conn.execute("""
+                            INSERT OR REPLACE INTO model_files (file_id, model_id, filename, size_bytes, download_url, created_at)
+                            VALUES (?, ?, ?, 0, ?, CURRENT_TIMESTAMP);
+                        """, (synth_file_id, model_id, archive_filename, m_row["archive_download_url"]))
+                    files = conn.execute("""
+                        SELECT mf.file_id, mf.filename, mf.download_url, mf.size_bytes
+                        FROM model_files mf WHERE mf.model_id = ?;
+                    """, (model_id,)).fetchall()
+
         if not files:
             raise RuntimeError(f"No file metadata recorded for Model ID {model_id}")
 
         in_flight_dir = work_dir / "in_flight"
+        in_flight_dir.mkdir(parents=True, exist_ok=True)
         staged_model_dir = work_dir / "staged" / str(model_id)
         staged_model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -607,6 +688,8 @@ class DownloadManager:
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             "Referer": "https://www.myminifactory.com/library",
         }
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
 
         with httpx.Client(headers=headers, cookies=self.cookies, timeout=30.0, follow_redirects=True) as client:
             for file_row in files:
@@ -614,6 +697,9 @@ class DownloadManager:
                 filename = file_row["filename"]
                 dl_url = file_row["download_url"]
                 expected_size = file_row["size_bytes"] or 0
+
+                if not dl_url:
+                    raise RuntimeError(f"No valid download URL available for file #{file_id} ('{filename}')")
 
                 cleaned_name = re.sub(r"^[0-9]+[_\-\s]+", "", filename)
                 part_path = in_flight_dir / f"{model_id}_{file_id}.part"
@@ -630,8 +716,13 @@ class DownloadManager:
 
                 with client.stream("GET", dl_url) as resp:
                     if resp.status_code in (401, 403):
-                        self.trip_circuit_breaker(f"Cloudflare/MMF Session expired (HTTP {resp.status_code}) on file {filename}")
-                        raise RuntimeError("Session auth expired")
+                        reason = (
+                            f"MyMiniFactory OAuth token expired (HTTP {resp.status_code}) on file {filename}"
+                            if self.access_token else
+                            f"Cloudflare/MMF Session expired (HTTP {resp.status_code}) on file {filename}"
+                        )
+                        self.trip_circuit_breaker(reason)
+                        raise RuntimeError(f"Authentication failure (HTTP {resp.status_code})")
                     if resp.status_code != 200:
                         raise RuntimeError(f"HTTP {resp.status_code} downloading file {file_id}")
 

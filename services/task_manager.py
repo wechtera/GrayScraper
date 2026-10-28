@@ -39,6 +39,14 @@ KNOWN_TOP_LEVEL_KEYS = {
 }
 
 
+def sanitize_segment(name: str) -> str:
+    if not name:
+        return "unknown"
+    clean = re.sub(r"[^a-zA-Z0-9_\-]+", "_", str(name))
+    clean = re.sub(r"_+", "_", clean)
+    return clean.strip("_") or "unknown"
+
+
 def inspect_schema_drift(model_id: int, data: dict) -> list[tuple[str, str]]:
     anomalies = []
     incoming_keys = set(data.keys())
@@ -141,6 +149,19 @@ def extract_normalized_records(model_id: int, data: dict, backup_path: Path):
                     item.get("created_at"),
                 ))
 
+    # Fallback: Adopt archive_download_url if no separate file items exist
+    archive_dl_url = data.get("archive_download_url")
+    if not file_rows and archive_dl_url:
+        clean_title = sanitize_segment(data.get("name") or f"Model_{model_id}")
+        file_rows.append((
+            model_id * 1000 + 1,
+            model_id,
+            f"{clean_title}.zip",
+            None,
+            archive_dl_url,
+            data.get("published_at"),
+        ))
+
     return model_row, tag_rows, file_rows
 
 
@@ -202,7 +223,8 @@ class TaskManager:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         release_month TEXT,
                         is_bonus BOOLEAN DEFAULT 0,
-                        vault_path TEXT
+                        vault_path TEXT,
+                        archive_download_url TEXT
                     );
 
                     CREATE TABLE IF NOT EXISTS model_tags (
@@ -252,6 +274,10 @@ class TaskManager:
                     CREATE INDEX IF NOT EXISTS idx_tags_tag ON model_tags(tag);
                     CREATE INDEX IF NOT EXISTS idx_files_model ON model_files(model_id);
                 """)
+
+                m_cols = {r[1] for r in conn.execute("PRAGMA table_info(models);").fetchall()}
+                if "archive_download_url" not in m_cols:
+                    conn.execute("ALTER TABLE models ADD COLUMN archive_download_url TEXT;")
 
                 task_cols = {r[1] for r in conn.execute("PRAGMA table_info(pipeline_tasks);").fetchall()}
                 if "params_json" not in task_cols:
@@ -448,10 +474,6 @@ class TaskManager:
                         WHERE id = ?;
                     """, (task_id,))
             return {"success": True, "task_id": task_id}
-
-    # -------------------------------------------------------------------------
-    # Backward Compatible Status, Cancel & History APIs
-    # -------------------------------------------------------------------------
 
     def get_status(self) -> Dict[str, Any]:
         with self._get_db() as conn:
@@ -957,12 +979,12 @@ class TaskManager:
                                 "Referer": "https://www.myminifactory.com/",
                                 "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                             }
-                            with httpx.Client(headers=headers, timeout=12.0, follow_redirects=True) as client:
-                                resp = client.get(primary_image_url)
+                            with httpx.Client(headers=headers, timeout=12.0, follow_redirects=True) as client_img:
+                                resp = client_img.get(primary_image_url)
                                 if resp.status_code == 200 and len(resp.content) > 0:
                                     cover_file.write_bytes(resp.content)
                         except Exception:
-                            pass  # Non-blocking: Catalog card will fall back to remote URL or SVG
+                            pass
 
                 async with db_lock:
                     try:
@@ -994,6 +1016,10 @@ class TaskManager:
                                     raw_backup_path = excluded.raw_backup_path,
                                     updated_at = CURRENT_TIMESTAMP;
                             """, model_row)
+
+                            archive_dl = data.get("archive_download_url")
+                            if archive_dl:
+                                conn.execute("UPDATE models SET archive_download_url = ? WHERE id = ?;", (archive_dl, model_id))
 
                             conn.execute("DELETE FROM model_tags WHERE model_id = ?;", (model_id,))
                             if tag_rows:
