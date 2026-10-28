@@ -1,0 +1,116 @@
+
+# Active and archived session cookies containing Cloudflare bypass & PHPSESSID
+cookies.json
+*cookies*.json
+*.env
+.env.*
+!.env.example
+
+# Chromium / Playwright persistent browser context & session states
+mmf_browser_profile/
+
+
+# Primary database file and write-ahead / rollback journals
+library.db
+library.db-wal
+library.db-shm
+library.db-journal
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# Transient test databases
+test_library.db*
+test_isolated.db*
+
+# Extracted 3D preview render caches and thumbnails
+previews/
+
+# Ingested MMF API JSON model files
+metadata/
+
+# Playwright scrape session run folders
+scrapes/
+
+
+# Fast NVMe local staging holding area
+staging/
+vault_staging/
+
+# Downloader in-flight chunk buffers and temporary files
+.work/
+**/.work/
+*.part
+*.tmp
+
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging, distribution, and pytest
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+*.log
+api_fetch.log
+seed_db.log
+
+# Quarantined developer artifacts, logs, and raw backup dumps
+Archival_DEV/logs/
+Archival_DEV/backups/
+Archival_DEV/surveys/
+
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
