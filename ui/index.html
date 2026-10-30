@@ -47,10 +47,8 @@
           </div>
         </div>
 
-        <!-- RENAMED: Downloads Tab -> Manage / Retrieve / Reconcile Assets -->
         <button class="tab-btn" id="nav-tab-downloads" onclick="switchTab('downloads')">Manage / Retrieve / Reconcile Assets</button>
         <button class="tab-btn" id="nav-tab-stashes" onclick="switchTab('stashes')">Stashes</button>
-        <button class="tab-btn" id="nav-tab-tasks" onclick="switchTab('tasks')">Pipeline Tasks</button>
         <button class="tab-btn" id="nav-tab-settings" onclick="switchTab('settings')">Settings</button>
         <button class="tab-btn" id="nav-tab-help" onclick="switchTab('help')">Help</button>
       </div>
@@ -58,7 +56,6 @@
 
     <!-- Header Action Buttons & Active Stash Widget -->
     <div class="header-actions">
-      <!-- Persistent Top-Nav Active Stash Widget -->
       <button type="button" class="btn-pill btn-stash-widget" id="header-stash-widget" onclick="switchTab('stashes')">
         <span class="stash-widget-icon">Stash: </span>
         <span id="header-stash-name">No Active Stash</span>
@@ -79,7 +76,7 @@
       <div class="stat-sub" id="stat-supported">-</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Rewards & Bonuses</div>
+      <div class="stat-label">Rewards &amp; Bonuses</div>
       <div class="stat-value" id="stat-bonuses">-</div>
       <div class="stat-sub stat-sub-bonus">Categorized Separately</div>
     </div>
@@ -99,7 +96,7 @@
     </div>
   </section>
 
-<!-- View 1: Monthly Releases Grouping -->
+  <!-- View 1: Monthly Releases Grouping -->
   <div id="view-releases" style="display:none;">
     <div class="audit-panel" id="audit-panel" style="display:none;">
       <div class="audit-header">
@@ -114,7 +111,6 @@
       <div class="anomaly-row" id="audit-anomalies"></div>
     </div>
 
-    <!-- Controls: Search + Creator Filter Dropdown + Patreon Checkbox -->
     <div class="controls">
       <input type="text" id="release-search" class="search-box" placeholder="Search title or keyword..." oninput="resetReleasePageAndLoad()">
       <select id="release-creator-filter" onchange="resetReleasePageAndLoad()">
@@ -125,7 +121,6 @@
       </label>
     </div>
 
-    <!-- Outer container for monthly grouped sections -->
     <div id="releases-grid"></div>
 
     <div class="pagination-bar" id="releases-pagination">
@@ -138,14 +133,14 @@
     </div>
   </div>
 
-  <!-- View 2: Model Explorer -->
+  <!-- View 2: Model Explorer (Default Landing) -->
   <div id="view-models">
     <div class="controls">
       <input type="text" id="model-search" class="search-box" placeholder="Search title, creator, or keyword...">
       <select id="model-creator-filter" onchange="resetModelPageAndLoad()"><option value="">All Creators</option></select>
       <input type="text" id="model-tag-filter" class="search-box search-box-tag" placeholder="Filter by tag (e.g. dragon)...">
       <label class="control-checkbox-label">
-        <input type="checkbox" id="bonus-filter" onchange="resetModelPageAndLoad()"> Rewards & Bonuses Only
+        <input type="checkbox" id="bonus-filter" onchange="resetModelPageAndLoad()"> Rewards &amp; Bonuses Only
       </label>
     </div>
     <div class="grid" id="models-grid"></div>
@@ -180,15 +175,14 @@
   <!-- View 4: Downloads Management Tab ("Manage / Retrieve / Reconcile Assets") -->
   <div id="view-downloads" style="display:none;">
     <div class="sub-tabs">
-      <button class="sub-btn active" onclick="switchDownloadSubView('pending')">Pending & Queue Explorer</button>
+      <button class="sub-btn active" onclick="switchDownloadSubView('pending')">Pending &amp; Queue Explorer</button>
       <button class="sub-btn" onclick="switchDownloadSubView('active')">Active Transfers</button>
-      <button class="sub-btn" onclick="switchDownloadSubView('history')">History & Audit Log</button>
+      <button class="sub-btn" onclick="switchDownloadSubView('history')">History &amp; Audit Log</button>
       <button class="sub-btn" onclick="switchDownloadSubView('reconcile')">Vault Reconcile</button>
-      <!-- ADDED: MMF Sync Sub-Tab -->
       <button class="sub-btn" onclick="switchDownloadSubView('sync')">MMF Sync</button>
     </div>
 
-    <!-- Sub-View A: Pending / Bulk Selection with Pagination -->
+    <!-- Sub-View A: Pending / Bulk Selection -->
     <div id="sub-dl-pending">
       <div class="controls">
         <input type="text" id="pending-search" class="search-box" placeholder="Filter models...">
@@ -230,7 +224,7 @@
       </div>
     </div>
 
-    <!-- Sub-View B: Active Transfers (Dual Pipeline) -->
+    <!-- Sub-View B: Active Transfers -->
     <div id="sub-dl-active" style="display:none;">
       <div class="controls controls-between">
         <div class="controls-status-group">
@@ -245,16 +239,12 @@
         </div>
       </div>
 
-      <h3 class="pipeline-section-heading">
-        1. Active Downloads (Fast Local NVMe/SSD Ingestion)
-      </h3>
+      <h3 class="pipeline-section-heading">1. Active Downloads (Fast Local NVMe/SSD Ingestion)</h3>
       <div id="active-download-workers-container" class="worker-container">
         <div class="empty-state-notice">No active downloads in flight.</div>
       </div>
 
-      <h3 class="pipeline-section-heading">
-        2. Background NAS Offloader (Local Workspace &rarr; Network Storage)
-      </h3>
+      <h3 class="pipeline-section-heading">2. Background NAS Offloader (Local Workspace &rarr; Network Storage)</h3>
       <div id="active-offload-workers-container" class="worker-container-lg">
         <div class="empty-state-notice">No offload migrations in progress.</div>
       </div>
@@ -286,7 +276,7 @@
       </table>
     </div>
 
-    <!-- Sub-View C: History & Audit Log with Pagination -->
+    <!-- Sub-View C: History & Audit Log -->
     <div id="sub-dl-history" style="display:none;">
       <div class="controls controls-between">
         <div class="filter-group">
@@ -332,16 +322,16 @@
       </div>
     </div>
 
-    <!-- Sub-View D: Vault Reconciliation & Integrity Audit -->
+    <!-- Sub-View D: Vault Reconciliation -->
     <div id="sub-dl-reconcile" style="display:none;">
       <div class="controls controls-wrap">
         <div class="control-actions-wrap">
           <div class="segmented-control">
             <button type="button" class="segmented-btn active" id="btn-mode-fast" onclick="setReconcileMode('fast')">
-              Fast Scan (Stat & Size)
+              Fast Scan (Stat &amp; Size)
             </button>
             <button type="button" class="segmented-btn" id="btn-mode-deep" onclick="setReconcileMode('deep')">
-              Deep Scan (CRC, STL & SHA-256)
+              Deep Scan (CRC, STL &amp; SHA-256)
             </button>
           </div>
           <button type="button" class="btn-pill btn-action-primary" id="btn-run-reconcile" onclick="triggerReconcileScan()">
@@ -368,7 +358,6 @@
         </div>
       </div>
 
-      <!-- Live Reconciliation Progress & Terminal Card -->
       <div id="reconcile-progress-container" class="card progress-card" style="display:none;">
         <div class="panel-header-row">
           <div class="panel-status-group">
@@ -388,12 +377,11 @@
         </div>
 
         <details id="reconcile-terminal-details" class="terminal-details" open>
-          <summary class="terminal-summary">Live Worker Output & Intermediate File Checks</summary>
+          <summary class="terminal-summary">Live Worker Output &amp; Intermediate File Checks</summary>
           <pre id="reconcile-task-logs" class="terminal-pre"></pre>
         </details>
       </div>
 
-      <!-- Metrics Cards -->
       <div class="metrics-grid metrics-grid-reconcile" id="reconcile-metrics-bar">
         <div class="stat-card">
           <div class="stat-label">Models Audited</div>
@@ -409,17 +397,14 @@
         </div>
       </div>
 
-      <!-- Reverse Orphan Section -->
       <div id="reconcile-orphan-section" class="orphan-section" style="display:none;"></div>
 
-      <!-- Discrepancy Findings Container -->
       <div id="reconcile-results-container">
         <div class="results-placeholder">
           No active scan results. Select a scan mode and click "Run Forward Reconciliation" or "Run Reverse Orphan Audit".
         </div>
       </div>
 
-      <!-- NEW: Informational Guide to Reconciliation Operations -->
       <div class="audit-panel panel-spaced" style="margin: 24px 24px 0 24px;">
         <div class="audit-header">
           <div>
@@ -439,44 +424,44 @@
           <div class="reconcile-guide-item">
             <h4 class="text-accent font-semibold font-md">Forward Reconciliation (Deep Scan)</h4>
             <p class="text-dim font-sm">
-              Performs exhaustive byte-level audits: CRC checksum tests on ZIP archives, binary STL header verification (validating 84-byte structure and triangle counts), ASCII STL validation, and SHA-256 bit-rot auditing.
+              Performs exhaustive byte-level audits: CRC checksum tests on ZIP archives, binary STL header verification, and SHA-256 bit-rot auditing.
             </p>
           </div>
           <div class="reconcile-guide-item">
             <h4 class="text-accent font-semibold font-md">Reverse Orphan Audit</h4>
             <p class="text-dim font-sm">
-              Scans vault storage from the physical drive upward to catch files and directories missing from the database, offering one-click deletion or automatic catalog ingestion.
+              Scans vault storage from the physical drive upward to catch files and directories missing from the database, offering one-click deletion or catalog ingestion.
             </p>
           </div>
           <div class="reconcile-guide-item">
             <h4 class="text-accent font-semibold font-md">Backfill Archive Inspection</h4>
             <p class="text-dim font-sm">
-              Runs the ArchivePeeker engine against stored archives (ZIP, RAR, 7z) to dissect internal file hierarchies, index miniature submodels, and extract thumbnail renders.
+              Runs the ArchivePeeker engine against stored archives to dissect internal hierarchies, index submodels, and extract thumbnail renders.
             </p>
           </div>
           <div class="reconcile-guide-item">
             <h4 class="text-accent font-semibold font-md">Backfill Model Previews</h4>
             <p class="text-dim font-sm">
-              Downloads and caches cover images to <code>previews/&lt;model_id&gt;/cover.jpg</code> using browser headers, providing full offline catalog browsing and reducing CDN network traffic.
+              Downloads and caches cover images to <code>previews/&lt;model_id&gt;/cover.jpg</code> for offline catalog browsing.
             </p>
           </div>
           <div class="reconcile-guide-item">
             <h4 class="text-accent font-semibold font-md">Staging Scratch Purge</h4>
             <p class="text-dim font-sm">
-              Cleans abandoned <code>.part</code> streaming files and stranded <code>.work/staged</code> folders left behind by cancelled, interrupted, or failed downloads to recover fast local scratch space.
+              Cleans abandoned <code>.part</code> streaming files and stranded <code>.work/staged</code> folders left behind by cancelled downloads.
             </p>
           </div>
           <div class="reconcile-guide-item">
             <h4 class="text-accent font-semibold font-md">Check Path Drift &amp; Realign</h4>
             <p class="text-dim font-sm">
-              Identifies legacy folder paths (bracketed IDs, unescaped whitespace, outdated designer folders) and renames them to match current sanitized storage rules while atomically updating database records.
+              Identifies legacy folder paths (bracketed IDs, spaces) and renames them to match current sanitized storage rules.
             </p>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- NEW Sub-View E: MMF Sync (Scrape Library & Ingest Metadata) -->
+    <!-- Sub-View E: MMF Sync -->
     <div id="sub-dl-sync" style="display:none;">
       <div class="audit-panel panel-spaced" style="margin: 16px 24px 20px 24px;">
         <div class="audit-header">
@@ -490,7 +475,6 @@
       </div>
 
       <div class="sync-grid">
-        <!-- Card 1: Scrape Library -->
         <div class="card sync-card">
           <div class="sync-card-header">
             <div>
@@ -501,10 +485,10 @@
           </div>
           <div class="sync-card-body">
             <p class="font-md">
-              Launches an automated Chromium browser running Playwright stealth evasion plugins with your saved session cookies (<code>PHPSESSID</code> and <code>cf_clearance</code>).
+              Launches an automated Chromium browser running Playwright stealth evasion plugins with your saved session cookies.
             </p>
             <p class="font-md text-dim">
-              Navigates your personal MyMiniFactory library, intercepts live object batches directly from internal API endpoints, and exports all owned model identifiers to <code>model_ids.txt</code> inside a timestamped folder under <code>scrapes/</code>.
+              Navigates your personal MyMiniFactory library, intercepts live object batches, and exports all owned model identifiers to <code>model_ids.txt</code>.
             </p>
             <div class="help-callout font-sm">
               <strong>Bypass Protection:</strong> Cloudflare Turnstile bot challenges are handled automatically through stored browser session credentials.
@@ -517,21 +501,20 @@
           </div>
         </div>
 
-        <!-- Card 2: Ingest Metadata -->
         <div class="card sync-card">
           <div class="sync-card-header">
             <div>
               <h3 class="sync-card-title">2. Ingest Metadata</h3>
-              <div class="text-dim font-xs mt-1">REST API Catalog Enrichment &amp; Local Asset Caching</div>
+              <div class="text-dim font-xs mt-1">REST API Catalog Hydration &amp; Local Asset Caching</div>
             </div>
-            <span class="badge badge-bonus font-sm">Step 2: Populate Catalog</span>
+            <span class="badge badge-bonus font-sm">Step 2: Hydrate Catalog</span>
           </div>
           <div class="sync-card-body">
             <p class="font-md">
-              Reads model IDs from a previous scrape folder or a manual list and queries the official MyMiniFactory API to build complete SQLite catalog records (models, tags, files, and monthly releases).
+              Reads model IDs from a previous scrape run and queries the official MyMiniFactory API to build complete SQLite catalog records.
             </p>
             <p class="font-md text-dim">
-              Features incremental delta updates (skipping previously indexed records), automatic tombstone tracking for removed campaigns, and locally caches primary preview thumbnails directly to <code>previews/&lt;model_id&gt;/cover.jpg</code> for offline access.
+              Features incremental delta updates, tombstone tracking for removed campaigns, and locally caches primary preview thumbnails directly to <code>previews/&lt;model_id&gt;/cover.jpg</code>.
             </p>
             <div class="help-callout font-sm">
               <strong>Safe Rate Limiting:</strong> Uses adaptive exponential backoff to respect upstream API rate limits and avoid HTTP 429 throttling.
@@ -547,7 +530,7 @@
     </div>
   </div>
 
-  <!-- View 5: Stashes ("A pile of gray") Master-Detail Workspace -->
+  <!-- View 5: Stashes Workspace -->
   <div id="view-stashes" style="display:none;">
     <div class="stash-layout-container">
       <aside class="stash-sidebar">
@@ -581,7 +564,7 @@
     </div>
   </div>
 
-  <!-- View 6: Settings (Full-Width Panels) -->
+  <!-- View 6: Settings & Pipeline Tasks Workspace -->
   <div id="view-settings" style="display:none;">
     <div class="settings-grid">
 
@@ -589,25 +572,83 @@
       <div class="settings-panel">
         <div class="settings-panel-header">
           <div>
-            <h2 class="settings-panel-title">Critical Storage & Directory Usage</h2>
+            <h2 class="settings-panel-title">Critical Storage &amp; Directory Usage</h2>
             <div class="settings-panel-subtitle">
               Disk allocation, file counts, and volume capacity across all core cache directories and vault storage.
             </div>
           </div>
-          <button type="button" class="btn-pill" onclick="window.refreshDirectoryUsage()">
-            Refresh Disk Stats
-          </button>
+          <div class="flex gap-2">
+            <button type="button" class="btn-pill btn-action-cancel" onclick="purgeStashExports(14)">
+              Purge Print Stashes (&gt;14 Days)
+            </button>
+            <button type="button" class="btn-pill btn-action-cancel" onclick="purgeLogs(14)">
+              Purge Logs (&gt;14 Days)
+            </button>
+            <button type="button" class="btn-pill" onclick="window.refreshDirectoryUsage()">
+              Refresh Disk Stats
+            </button>
+          </div>
         </div>
         <div id="critical-directories-table-container"></div>
+      </div>
+
+      <!-- Card 1b: In-Place External Libraries Management -->
+      <div class="settings-panel" id="external-libraries-panel">
+        <div class="settings-panel-header">
+          <div>
+            <h2 class="settings-panel-title">In-Place External Libraries</h2>
+            <div class="settings-panel-subtitle">
+              Manage local &amp; network storage collections (e.g., Loot Studios) indexed zero-copy in strictly read-only mode.
+            </div>
+          </div>
+          <div class="flex gap-2">
+            <button type="button" class="btn-pill" onclick="window.loadExternalLibraries()">Refresh Libraries</button>
+          </div>
+        </div>
+
+        <div id="external-libraries-table-container">
+          <div class="table-msg">Loading registered libraries...</div>
+        </div>
+
+        <div class="mt-4 pt-3" style="border-top: 1px solid #262635;">
+          <h3 class="font-bold font-md mb-2 text-accent">Register New In-Place Library</h3>
+          <div class="settings-form-row two-col">
+            <div class="settings-field-group">
+              <label for="new-lib-path">Top-Level Storage Directory Path *</label>
+              <div class="settings-input-with-button">
+                <input type="text" id="new-lib-path" placeholder="/Volumes/STL/Loot Studios" spellcheck="false">
+                <button type="button" class="btn-pill" onclick="window.openDirectoryPicker('new-lib-path')">Browse</button>
+              </div>
+              <span class="form-help-text">Direct path to library root on NAS or local drive (strictly read-only).</span>
+            </div>
+            <div class="settings-field-group">
+              <label for="new-lib-name">Display Name (Optional)</label>
+              <input type="text" id="new-lib-name" placeholder="Defaults to folder name" spellcheck="false">
+              <span class="form-help-text">Label shown in catalog and monthly releases.</span>
+            </div>
+          </div>
+          <div class="settings-form-row two-col mt-2">
+            <div class="settings-field-group">
+              <label for="new-lib-creator">Default Creator / Studio (Optional)</label>
+              <input type="text" id="new-lib-creator" placeholder="e.g. Loot Studios" spellcheck="false">
+              <span class="form-help-text">Assigned to indexed models if not specified in release subfolders.</span>
+            </div>
+            <div class="settings-field-group flex items-end">
+              <button type="button" class="btn-pill btn-action-primary" onclick="window.handleAddExternalLibrary()">
+                Register In-Place Library
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Card 2: Storage & Directory Configuration -->
       <div class="settings-panel">
         <div class="settings-panel-header">
           <div>
-            <h2 class="settings-panel-title">Storage & Directory Configuration</h2>
+            <h2 class="settings-panel-title">Storage &amp; Directory Configuration</h2>
             <div class="settings-panel-subtitle">
-              Configure local NVMe high-speed staging paths and cold-archive NAS storage pools.
+              Configure local NVMe high-speed staging paths, cold-archive NAS storage pools, and slicer export staging.
             </div>
           </div>
           <div class="flex gap-2">
@@ -636,6 +677,17 @@
           </div>
         </div>
 
+        <div class="settings-form-row mt-3">
+          <div class="settings-field-group">
+            <label for="setting-stash-export-path">3. Slicer Print Queue Path (Local Workstation)</label>
+            <div class="settings-input-with-button">
+              <input type="text" id="setting-stash-export-path" placeholder="~/Downloads/DESYNC_Print_Queue" spellcheck="false">
+              <button type="button" class="btn-pill" onclick="openDirectoryPicker('setting-stash-export-path')">Browse</button>
+            </div>
+            <span class="form-help-text">Local destination directory where curated stash manifests are unpacked with renders for slicer prep.</span>
+          </div>
+        </div>
+
         <div class="settings-actions-bar">
           <button type="button" class="btn-pill btn-action-queue" onclick="saveSettingsForm()">
             Save Storage Paths
@@ -647,7 +699,7 @@
       <div class="settings-panel">
         <div class="settings-panel-header">
           <div>
-            <h2 class="settings-panel-title">Worker Engine & I/O Stream Tuning</h2>
+            <h2 class="settings-panel-title">Worker Engine &amp; I/O Stream Tuning</h2>
             <div class="settings-panel-subtitle">
               Concurrency rates, offloader pacing, and memory buffer chunk allocations.
             </div>
@@ -691,16 +743,13 @@
         </div>
 
         <div class="buffer-tradeoff-panel mt-3">
-          <div class="panel-subheading">Buffer Sizing & Network Tradeoffs</div>
+          <div class="panel-subheading">Buffer Sizing &amp; Network Tradeoffs</div>
           <ul class="help-bullet-list help-bullet-list-muted">
             <li>
-              <strong>Download Stream Buffer:</strong> Smaller buffers (0.25–0.5 MB) reduce RAM consumption and yield smoother real-time speed metrics. Larger buffers (2–4 MB) reduce CPU context switching and maximize sequential write performance on fast NVMe scratch drives over Gigabit internet.
+              <strong>Download Stream Buffer:</strong> Smaller buffers (0.25–0.5 MB) reduce RAM consumption. Larger buffers (2–4 MB) maximize sequential write throughput on fast NVMe scratch drives.
             </li>
             <li>
-              <strong>NAS Offload Buffer:</strong> SMB and NFS network file protocols incur per-packet round-trip latency. While 4 MB is optimal for 1 GbE networks (~112 MB/s), increasing to 8–16 MB dramatically reduces network protocol overhead on 2.5 GbE and 10 GbE connections, allowing transfers to achieve line speed.
-            </li>
-            <li>
-              <strong>Memory Footprint:</strong> Total buffer RAM is bounded by: <code>(Worker Concurrency × Stream Buffer) + (Offloader Concurrency × Offload Buffer)</code>.
+              <strong>NAS Offload Buffer:</strong> 4 MB is optimal for 1 GbE networks (~112 MB/s). Increasing to 8–16 MB dramatically reduces protocol overhead on 2.5 GbE and 10 GbE connections.
             </li>
           </ul>
         </div>
@@ -712,7 +761,56 @@
         </div>
       </div>
 
-      <!-- Card 4: MyMiniFactory Native OAuth 2.0 Authentication -->
+      <!-- Card 4: Diagnostic Logging & Subsystem Layers -->
+      <div class="settings-panel">
+        <div class="settings-panel-header">
+          <div>
+            <h2 class="settings-panel-title">Diagnostic Logging &amp; Subsystem Layers</h2>
+            <div class="settings-panel-subtitle">
+              Toggle deep tracing for specific engine components without restarting the server.
+            </div>
+          </div>
+          <div class="flex gap-2">
+            <button type="button" class="btn-pill btn-action-primary" onclick="saveLoggingSettings()">
+              Apply Logging Configuration
+            </button>
+          </div>
+        </div>
+
+        <div class="settings-form-row two-col">
+          <div class="settings-field-group">
+            <label for="setting-log-level">Global Severity Level</label>
+            <select id="setting-log-level" class="search-box">
+              <option value="DEBUG">DEBUG (Exhaustive Trace)</option>
+              <option value="INFO" selected>INFO (Standard Operations)</option>
+              <option value="WARNING">WARNING (Errors &amp; Retries Only)</option>
+              <option value="ERROR">ERROR (Fatal Failures Only)</option>
+            </select>
+            <span class="form-help-text">Controls global minimum output severity.</span>
+          </div>
+
+          <div class="settings-field-group">
+            <label>Subsystem Diagnostic Layers</label>
+            <div class="checkbox-group-grid">
+              <label class="control-checkbox-label">
+                <input type="checkbox" id="layer-http" value="http"> HTTP &amp; OAuth Network Tracing
+              </label>
+              <label class="control-checkbox-label">
+                <input type="checkbox" id="layer-storage" value="storage"> Storage I/O &amp; NAS Offload
+              </label>
+              <label class="control-checkbox-label">
+                <input type="checkbox" id="layer-archive" value="archive"> ArchivePeeker &amp; STL Mesh Checks
+              </label>
+              <label class="control-checkbox-label">
+                <input type="checkbox" id="layer-sql" value="sql"> SQLite Query &amp; Lock Diagnostics
+              </label>
+            </div>
+            <span class="form-help-text mt-1">Disabled layers abort log generation at zero CPU cost.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 5: MyMiniFactory Native OAuth 2.0 Authentication -->
       <div class="settings-panel">
         <div class="settings-panel-header">
           <div>
@@ -761,11 +859,11 @@
         </div>
       </div>
 
-      <!-- Card 5: Session Authentication & Cookies -->
+      <!-- Card 6: Session Authentication & Cookies -->
       <div class="settings-panel">
         <div class="settings-panel-header">
           <div>
-            <h2 class="settings-panel-title">Session Authentication & Cookies</h2>
+            <h2 class="settings-panel-title">Session Authentication &amp; Cookies</h2>
             <div class="settings-panel-subtitle">
               Cloudflare clearance bypass tokens and session identifiers for direct archive downloading.
             </div>
@@ -795,97 +893,95 @@
         </div>
       </div>
 
+      <!-- Card 7: Pipeline Tasks & Automation (Full-Width Bottom Panel) -->
+      <div class="settings-panel settings-panel-full" id="settings-pipeline-tasks">
+        <div class="settings-panel-header">
+          <div>
+            <h2 class="settings-panel-title">Pipeline Tasks &amp; Automation</h2>
+            <div class="settings-panel-subtitle">
+              Monitor background Playwright scrapers, REST metadata ingest workers, and reconciliation sweeps.
+            </div>
+          </div>
+          <div class="footer-actions">
+            <button type="button" class="btn-pill" id="btn-refresh-tasks" onclick="refreshTasksStatus()">Refresh Tasks</button>
+          </div>
+        </div>
+
+        <div class="card task-monitor-card mt-3" id="active-task-container">
+          <div class="task-card-header">
+            <div class="task-badge-wrapper">
+              <span class="status-badge status-not_downloaded" id="task-status-badge">IDLE</span>
+              <span class="task-type-label" id="task-type-badge">No background tasks running</span>
+            </div>
+            <div class="btn-group">
+              <button type="button" class="btn-pill btn-action-cancel" id="btn-cancel-active-task" onclick="cancelActiveTask()" style="display:none;">
+                Cancel Task
+              </button>
+              <button type="button" class="btn-pill btn-action-cancel" id="btn-kill-active-task" onclick="killActiveTask()" style="display:none;" title="Force-terminate stuck runner and release pipeline lock">
+                Force Kill
+              </button>
+              <button type="button" class="btn-pill" id="btn-clear-task-history" onclick="clearTaskHistory()">
+                Clear History
+              </button>
+            </div>
+          </div>
+
+          <div class="task-progress-section">
+            <div class="progress-bar-bg">
+              <div class="progress-bar-fill" id="task-progress-bar"></div>
+            </div>
+            <div class="progress-meta font-md">
+              <span id="task-progress-label">Worker idle and waiting for jobs</span>
+              <span id="task-progress-pct" class="progress-pct-text">0%</span>
+            </div>
+          </div>
+
+          <div class="task-log-wrapper">
+            <div class="log-viewer-header">
+              <span class="log-viewer-title font-md">Live Worker Output</span>
+              <div class="log-viewer-tools">
+                <label class="autoscroll-label font-md">
+                  <input type="checkbox" id="chk-log-autoscroll" checked> Auto-scroll
+                </label>
+                <button type="button" class="btn-link log-clear-btn" id="btn-clear-log-view" onclick="clearTaskLogView()">Clear Console</button>
+              </div>
+            </div>
+            <pre class="task-log-viewer" id="task-live-logs">System ready. Run Scrape Library or Ingest Metadata from MMF Sync to stream live execution output...</pre>
+          </div>
+        </div>
+
+        <div class="section-wrap mt-4">
+          <h3 class="table-heading font-md font-bold mb-2">Recent Pipeline History</h3>
+          <table>
+            <thead>
+              <tr>
+                <th class="col-id">ID</th>
+                <th>Task Type</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Label / Details</th>
+                <th>Started</th>
+                <th>Completed</th>
+              </tr>
+            </thead>
+            <tbody id="task-history-tbody">
+              <tr>
+                <td colspan="7" class="td-empty">Loading pipeline history...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
     </div>
   </div>
 
-  <!-- View 7: Pipeline Tasks & Automation -->
-  <div id="view-tasks" style="display:none;">
-    <div class="audit-panel panel-spaced">
-      <div class="audit-header">
-        <div>
-          <div class="audit-title audit-title-lg">Pipeline Tasks & Automation</div>
-          <div class="audit-desc font-md">
-            Monitor background Playwright scrapers, REST metadata ingest workers, and incremental delta syncs.
-          </div>
-        </div>
-        <div class="footer-actions">
-          <button type="button" class="btn-pill" id="btn-refresh-tasks" onclick="refreshTasksStatus()">Refresh Tasks</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card task-monitor-card" id="active-task-container">
-      <div class="task-card-header">
-        <div class="task-badge-wrapper">
-          <span class="status-badge status-not_downloaded" id="task-status-badge">IDLE</span>
-          <span class="task-type-label" id="task-type-badge">No background tasks running</span>
-        </div>
-        <div class="btn-group">
-          <button type="button" class="btn-pill btn-action-cancel" id="btn-cancel-active-task" onclick="cancelActiveTask()" style="display:none;">
-            Cancel Task
-          </button>
-          <button type="button" class="btn-pill btn-action-cancel" id="btn-kill-active-task" onclick="killActiveTask()" style="display:none;" title="Force-terminate stuck runner and release pipeline lock">
-            Force Kill
-          </button>
-          <button type="button" class="btn-pill" id="btn-clear-task-history" onclick="clearTaskHistory()">
-            Clear History
-          </button>
-        </div>
-      </div>
-
-      <div class="task-progress-section">
-        <div class="progress-bar-bg">
-          <div class="progress-bar-fill" id="task-progress-bar"></div>
-        </div>
-        <div class="progress-meta font-md">
-          <span id="task-progress-label">Worker idle and waiting for jobs</span>
-          <span id="task-progress-pct" class="progress-pct-text">0%</span>
-        </div>
-      </div>
-
-      <div class="task-log-wrapper">
-        <div class="log-viewer-header">
-          <span class="log-viewer-title font-md">Live Worker Output</span>
-          <div class="log-viewer-tools">
-            <label class="autoscroll-label font-md">
-              <input type="checkbox" id="chk-log-autoscroll" checked> Auto-scroll
-            </label>
-            <button type="button" class="btn-link log-clear-btn" id="btn-clear-log-view" onclick="clearTaskLogView()">Clear Console</button>
-          </div>
-        </div>
-        <pre class="task-log-viewer" id="task-live-logs">System ready. Run Scrape Library or Ingest Metadata from MMF Sync to stream live execution output...</pre>
-      </div>
-    </div>
-
-    <div class="section-wrap">
-      <h3 class="table-heading">Recent Pipeline History</h3>
-      <table>
-        <thead>
-          <tr>
-            <th class="col-id">ID</th>
-            <th>Task Type</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Label / Details</th>
-            <th>Started</th>
-            <th>Completed</th>
-          </tr>
-        </thead>
-        <tbody id="task-history-tbody">
-          <tr>
-            <td colspan="7" class="td-empty">Loading pipeline history...</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- View 8: Help & Documentation Manual (Larger Fonts & Enhanced Hierarchy) -->
+  <!-- View 7: Help & Documentation Manual -->
   <div id="view-help" style="display:none;">
     <div class="audit-panel panel-spaced">
       <div class="audit-header">
         <div>
-          <div class="audit-title audit-title-lg">System Architecture & Operations Guide</div>
+          <div class="audit-title audit-title-lg">System Architecture &amp; Operations Guide</div>
           <div class="audit-desc font-md">
             Operational reference for storage staging, authentication pipelines, stash manifests, and catalog integrity auditing.
           </div>
@@ -894,7 +990,6 @@
     </div>
 
     <div class="help-grid">
-      <!-- Card 1: Quick Start -->
       <article class="card help-card">
         <div class="help-card-header">
           <h3>Quick Start &amp; Core Workflow</h3>
@@ -906,28 +1001,27 @@
               <strong>Configure Session Cookies:</strong> Under <code>Settings &rarr; Session Authentication &amp; Cookies</code>, supply your <code>PHPSESSID</code> and <code>cf_clearance</code> tokens.
             </li>
             <li>
-              <strong>Execute Library Scrape:</strong> Under <code>Manage / Retrieve / Reconcile Assets &rarr; MMF Sync</code>, click <code>Launch Library Scraper</code>. Playwright launches Chromium with stealth evasion plugins, navigates to your MMF library, intercepts data API payloads, and exports all model IDs to <code>model_ids.txt</code>.
+              <strong>Execute Library Scrape:</strong> Under <code>Manage / Retrieve / Reconcile Assets &rarr; MMF Sync</code>, click <code>Launch Library Scraper</code>. Playwright intercepts data API payloads and exports all model IDs to <code>model_ids.txt</code>.
             </li>
             <li>
-              <strong>Ingest Model Metadata:</strong> Click <code>Open Metadata Ingestion Pipeline</code>, selecting your latest scrape directory. The ingestion worker computes an incremental delta, skipping already active records, populating new models, tags, and files, and caching cover previews locally.
+              <strong>Ingest Model Metadata:</strong> Click <code>Open Metadata Ingestion Pipeline</code>. The worker computes an incremental delta, populating models, tags, and files, and caching cover previews locally.
             </li>
             <li>
-              <strong>Staged Downloads &amp; Offload:</strong> Select models from the <code>Pending &amp; Queue Explorer</code> tab to queue them for fast NVMe chunk downloads and automatic verification before migration to your bulk vault.
+              <strong>Staged Downloads &amp; Offload:</strong> Select models from the <code>Pending &amp; Queue Explorer</code> tab to queue them for fast NVMe chunk downloads and automatic migration to your vault.
             </li>
           </ol>
         </div>
       </article>
 
-      <!-- Card 2: Two-Tier Staging -->
       <article class="card help-card">
         <div class="help-card-header">
           <h3>Two-Tier Staging &amp; NAS Offload Architecture</h3>
         </div>
         <div class="help-card-body">
-          <p>To eliminate network file protocol lockups and protect mechanical parity arrays from high-frequency write churn, storage follows a dual-tier staging pipeline:</p>
+          <p>To eliminate network file protocol lockups and protect mechanical parity arrays, storage follows a dual-tier staging pipeline:</p>
           <div class="help-callout">
             <strong>Tier 1: High-Speed NVMe Scratch (Staging Path)</strong><br>
-            All parallel chunk downloads, temporary streams, and archive extraction passes execute inside the local scratch folder. This guarantees that network drive latency never slows down active downloads.
+            All parallel chunk downloads, temporary streams, and archive extraction passes execute inside the local scratch folder.
           </div>
           <div class="help-callout">
             <strong>Tier 2: Cold/Archive Target Storage Pool (NAS Vault Path)</strong><br>
@@ -940,7 +1034,6 @@
         </div>
       </article>
 
-      <!-- Card 3: Authentication -->
       <article class="card help-card">
         <div class="help-card-header">
           <h3>Authentication Hierarchy (OAuth 2.0 vs. Cloudflare)</h3>
@@ -959,24 +1052,23 @@
               <tr>
                 <td><code>Authorization: Bearer</code></td>
                 <td>Primary (API)</td>
-                <td>Direct REST calls (<code>/api/v2/objects/...</code>). If the Bearer token expires (HTTP 401), the worker automatically strips it and falls back to session cookies.</td>
+                <td>Direct REST calls and direct authenticated download streams.</td>
               </tr>
               <tr>
                 <td><code>PHPSESSID</code></td>
                 <td>Session</td>
-                <td>Session identity cookie confirming user ownership of paid/backed objects. Required for downloading files.</td>
+                <td>Session identity cookie confirming user ownership of paid/backed objects. Fallback for cookie-based downloads.</td>
               </tr>
               <tr>
                 <td><code>cf_clearance</code></td>
                 <td>Bypass</td>
-                <td>Cloudflare clearance token. Injected into Playwright and HTTP clients to pass Turnstile bot challenges without interactive CAPTCHAs.</td>
+                <td>Cloudflare clearance token. Injected into Playwright and HTTP clients to pass Turnstile bot challenges.</td>
               </tr>
             </tbody>
           </table>
         </div>
       </article>
 
-      <!-- Card 4: Circuit Breaker -->
       <article class="card help-card">
         <div class="help-card-header">
           <h3>Circuit Breaker &amp; Unavailable Objects (Tombstones)</h3>
@@ -985,51 +1077,30 @@
           <p>The ingestion and download engines employ proactive safeguards to prevent IP bans and avoid infinite retry loops:</p>
           <ul class="help-bullet-list">
             <li>
-              <strong>Rate Limiting (HTTP 429):</strong> The worker inspects the <code>Retry-After</code> header, logs the hold period, and sleeps execution until the rate window elapses.
+              <strong>Rate Limiting (HTTP 429):</strong> The worker inspects the <code>Retry-After</code> header, logs the hold period, and sleeps execution until the window elapses.
             </li>
             <li>
-              <strong>Circuit Breaker Pause (HTTP 401/403):</strong> If session cookies expire mid-transfer, downloads halt immediately and activate the warning banner, preventing wasted requests.
+              <strong>Circuit Breaker Pause (HTTP 401/403):</strong> If session credentials expire mid-transfer, downloads halt immediately and activate the warning banner.
             </li>
             <li>
-              <strong>Tombstone Recording (HTTP 404 / 410):</strong> Models removed or privatized by creators return 404. The ingestor marks them as <code>[Unavailable Model &lt;id&gt;]</code> with <code>__tombstone__: true</code>.
-            </li>
-            <li>
-              <strong>Automatic Tombstone Reattempts:</strong> Because creators often re-publish missing campaigns, delta calculations intentionally re-poll tombstones on every run without skipping them as permanently complete.
+              <strong>Tombstone Recording (HTTP 404 / 410):</strong> Models removed or privatized by creators return 404 and are safely cataloged as unavailable without breaking ingestion runs.
             </li>
           </ul>
         </div>
       </article>
 
-      <!-- Card 5: Stashes -->
       <article class="card help-card">
         <div class="help-card-header">
           <h3>Stash Management (&ldquo;A pile of gray&rdquo;)</h3>
         </div>
         <div class="help-card-body">
           <p>
-            Stashes serve as logical staging manifests for curating printing campaigns, resin batches, or build queues before transferring files across networks or initiating disk writes.
+            Stashes serve as logical staging manifests for curating printing campaigns, resin batches, or build queues before transferring files across networks.
           </p>
-
           <div class="help-callout">
             <strong>Absolute File Safety Guarantee:</strong><br>
-            All stash actions are purely logical manifest operations in SQLite. Adding items, removing lines, or deleting an entire stash manifest will <em>never</em> delete, alter, or unlink physical archive files stored in your local staging directory or NAS vault.
+            All stash actions are purely logical manifest operations in SQLite. Adding or deleting items will never touch physical archive files on disk.
           </div>
-
-          <p><strong>Polymorphic 4-Tier Staging Hierarchy:</strong></p>
-          <ul class="help-bullet-list">
-            <li>
-              <strong>Tier 1 — Full Model Bundles:</strong> Stages all archives, loose STLs, and documentation attached to an object directly from the catalog grid or model detail modal.
-            </li>
-            <li>
-              <strong>Tier 2 — Individual Archive Files:</strong> Stages specific multi-gigabyte ZIP, RAR, or LYCHE project packages from the model files inspection modal.
-            </li>
-            <li>
-              <strong>Tier 3 — Segmented Submodels:</strong> Stages discrete miniatures or character figures (e.g. <em>Ghul B</em> or <em>Armored Moray Rider</em>) discovered by the ArchivePeeker engine.
-            </li>
-            <li>
-              <strong>Tier 4 — Raw Internal Meshes:</strong> Stages individual nested meshes or weapon bits directly from the archive raw file tree table.
-            </li>
-          </ul>
         </div>
       </article>
     </div>
@@ -1175,7 +1246,7 @@
       </div>
       <div class="modal-body modal-body-stack">
         <p class="modal-desc font-md">
-          Populates SQLite catalog records (models, tags, files, and creator bundles) by polling MyMiniFactory API v2 endpoints using exponential backoff.
+          Hydrates SQLite catalog records (models, tags, files, and creator bundles) by polling MyMiniFactory API v2 endpoints using exponential backoff.
         </p>
 
         <div class="modal-tabs">
@@ -1237,6 +1308,7 @@
     </div>
   </div>
 
+  <!-- Model Detail Modal -->
   <div class="modal-backdrop" id="model-detail-modal">
     <div class="modal modal-xl">
       <div class="modal-header">
@@ -1252,6 +1324,7 @@
     </div>
   </div>
 
+  <!-- Archive Inspection Modal -->
   <div class="modal-backdrop" id="modal-archive-viewer">
     <div class="modal modal-xl">
       <div class="modal-header">
@@ -1273,6 +1346,32 @@
       </div>
       <div class="modal-body" id="archive-viewer-body">
         <div class="loading-placeholder-lg">Loading archive contents...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Ephemeral 3D Render Lightbox -->
+  <div class="modal-backdrop" id="modal-ephemeral-render" style="display:none; z-index:9999;">
+    <div class="modal modal-lg" style="max-width:850px;">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title-accent" id="ephemeral-render-title">Component 3D Render</h2>
+          <div class="modal-subtitle font-md" id="ephemeral-render-subtitle">Angle: Front-Left (3/4 Profile)</div>
+        </div>
+        <button type="button" class="tab-btn" onclick="window.closeEphemeralRenderModal()">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="ephemeral-view-pills" id="ephemeral-pills-container">
+          <button type="button" class="btn-pill font-xs pill-view active" data-view="front_left" onclick="window.switchEphemeralView('front_left')">Front-Left (3/4)</button>
+          <button type="button" class="btn-pill font-xs pill-view" data-view="front_right" onclick="window.switchEphemeralView('front_right')">Front-Right</button>
+          <button type="button" class="btn-pill font-xs pill-view" data-view="back_right" onclick="window.switchEphemeralView('back_right')">Back-Right</button>
+          <button type="button" class="btn-pill font-xs pill-view" data-view="back_left" onclick="window.switchEphemeralView('back_left')">Back-Left</button>
+          <button type="button" class="btn-pill font-xs pill-view" data-view="top_down" onclick="window.switchEphemeralView('top_down')">Top-Down</button>
+          <button type="button" class="btn-pill font-xs pill-view" data-view="bottom_up" onclick="window.switchEphemeralView('bottom_up')">Bottom-Up</button>
+        </div>
+        <div class="ephemeral-image-stage" id="ephemeral-stage">
+          <div class="loading-placeholder">Initializing Blender preview stream...</div>
+        </div>
       </div>
     </div>
   </div>

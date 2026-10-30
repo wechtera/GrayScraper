@@ -85,7 +85,9 @@ yarn-error.log*
 pnpm-debug.log*
 
 
+logs/
 *.log
+*.log*
 api_fetch.log
 seed_db.log
 
@@ -93,7 +95,7 @@ seed_db.log
 Archival_DEV/logs/
 Archival_DEV/backups/
 Archival_DEV/surveys/
-
+Archival_DEV/*
 
 # macOS
 .DS_Store

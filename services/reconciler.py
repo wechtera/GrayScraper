@@ -1,11 +1,13 @@
 """
 services/reconciler.py - Dual-mode, reverse audit, staging cleanup, path drift,
 archive peeker backfill, and catalog preview caching engine.
+Instrumented with dynamic topic-based subsystem logging ('storage', 'archive', 'sql', 'http').
 """
 
 from datetime import datetime
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -27,6 +29,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from services.downloader import StorageManager, StorageUnavailableError
+from services.logger import log_layer, logger
 
 try:
     from .archive_peeker import ArchivePeeker
@@ -52,6 +55,7 @@ def validate_stl_file(file_path: Path) -> Tuple[bool, Optional[str]]:
     try:
         file_size = file_path.stat().st_size
         if file_size < 84:
+            log_layer("archive", logging.DEBUG, f"STL too small: {file_path.name} ({file_size} B)")
             return False, f"STL file too small ({file_size} B, min 84 B for binary header)"
 
         with open(file_path, "rb") as f:
@@ -64,6 +68,7 @@ def validate_stl_file(file_path: Path) -> Tuple[bool, Optional[str]]:
         expected_binary_size = 84 + (50 * num_triangles)
 
         if file_size == expected_binary_size:
+            log_layer("archive", logging.DEBUG, f"Binary STL valid: {file_path.name} ({num_triangles} triangles)")
             return True, None
 
         with open(file_path, "rb") as f:
@@ -72,14 +77,19 @@ def validate_stl_file(file_path: Path) -> Tuple[bool, Optional[str]]:
                 f.seek(max(0, file_size - 256), os.SEEK_SET)
                 tail_chunk = f.read(256).strip().lower()
                 if b"endsolid" in tail_chunk:
+                    log_layer("archive", logging.DEBUG, f"ASCII STL valid: {file_path.name}")
                     return True, None
+                log_layer("archive", logging.WARNING, f"ASCII STL missing endsolid: {file_path.name}")
                 return False, "ASCII STL header found ('solid') but closing 'endsolid' token is missing"
 
-        return False, (
+        err = (
             f"Binary STL triangle count mismatch (Header: {num_triangles} triangles, "
             f"expected {expected_binary_size} B, got {file_size} B) and invalid ASCII format"
         )
+        log_layer("archive", logging.WARNING, f"STL validation failed for {file_path.name}: {err}")
+        return False, err
     except Exception as e:
+        log_layer("archive", logging.ERROR, f"STL check exception on {file_path.name}: {e}")
         return False, f"STL validation error: {e}"
 
 
@@ -91,7 +101,9 @@ def compute_file_sha256(file_path: Path, chunk_size: int = 1024 * 1024) -> str:
             if not chunk:
                 break
             hasher.update(chunk)
-    return hasher.hexdigest()
+    digest = hasher.hexdigest()
+    log_layer("storage", logging.DEBUG, f"Computed SHA-256 for {file_path.name}: {digest[:12]}...")
+    return digest
 
 
 class VaultReconciler:
@@ -176,6 +188,7 @@ class VaultReconciler:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(reconciliation_runs);").fetchall()}
                 if "scan_mode" not in cols:
                     conn.execute("ALTER TABLE reconciliation_runs ADD COLUMN scan_mode TEXT DEFAULT 'fast';")
+        log_layer("sql", logging.DEBUG, "VaultReconciler schema verified.")
 
     def execute_reconciliation(
         self,
@@ -197,9 +210,11 @@ class VaultReconciler:
         except StorageUnavailableError as e:
             err = f"Vault storage unreachable: {e}"
             log(f"ERROR: {err}")
+            log_layer("storage", logging.ERROR, f"Reconciliation aborted: {err}")
             return {"success": False, "error": err, "discrepancies": [], "summary": {}}
 
         log(f"Vault storage verified at '{nas_root}'. Initializing {mode.upper()} sweep...")
+        log_layer("storage", logging.INFO, f"Starting {mode.upper()} reconciliation on '{nas_root}'")
 
         if mode == "reverse":
             return self._execute_reverse(nas_root, progress, log, is_cancelled)
@@ -214,6 +229,7 @@ class VaultReconciler:
         for root, dirs, _ in os.walk(str(nas_root)):
             if is_cancelled():
                 log("Audit cancelled by operator during directory discovery.")
+                log_layer("storage", logging.INFO, "Reverse audit cancelled by operator during crawl.")
                 return {"success": False, "cancelled": True, "discrepancies": []}
 
             root_path = Path(root)
@@ -233,6 +249,7 @@ class VaultReconciler:
 
         total = len(candidate_model_dirs)
         log(f"Identified {total} candidate object directories. Verifying against SQLite catalog...")
+        log_layer("storage", logging.DEBUG, f"Reverse audit: {total} candidate directories found on disk.")
 
         with self._get_db() as conn:
             known_model_ids = {r[0] for r in conn.execute("SELECT id FROM models;").fetchall()}
@@ -275,6 +292,7 @@ class VaultReconciler:
                     "detail": f"Model ID #{extracted_id} does not exist in database." if extracted_id else "Folder has no registered model record.",
                 })
                 log(f"[ORPHAN] Discovered untracked directory: {model_dir.name}")
+                log_layer("storage", logging.WARNING, f"Orphan directory detected: {model_dir.name} ({sz} B)")
                 continue
 
             files_dir = model_dir / "files"
@@ -315,6 +333,7 @@ class VaultReconciler:
                             "detail": f"File '{disk_file.name}' exists in vault files/ directory but is missing from database.",
                         })
                         log(f"[UNTRACKED] Model #{extracted_id}: Found loose asset '{disk_file.name}'")
+                        log_layer("storage", logging.WARNING, f"Untracked asset: Model #{extracted_id} -> '{disk_file.name}'")
 
             if not had_untracked:
                 healthy_models_count += 1
@@ -335,6 +354,7 @@ class VaultReconciler:
             "untracked_files": untracked_files,
         }
         self._save_run_snapshot("completed", "reverse", report)
+        log_layer("storage", logging.INFO, f"Reverse audit finished: {len(orphan_directories)} orphans, {len(untracked_files)} untracked files.")
         return report
 
     def _execute_forward(self, nas_root: Path, scan_mode: str, progress, log, is_cancelled) -> Dict[str, Any]:
@@ -350,6 +370,7 @@ class VaultReconciler:
 
         total = len(models)
         log(f"Found {total} models marked as completed/archived. Initiating forward integrity scan...")
+        log_layer("storage", logging.DEBUG, f"Forward audit: Inspecting {total} models.")
 
         discrepancies: List[Dict[str, Any]] = []
         healthy_count = 0
@@ -385,6 +406,7 @@ class VaultReconciler:
                     "defect": "DIRECTORY_NOT_FOUND", "detail": "Entire vault folder is missing on storage.",
                 })
                 log(f"[DEFECT] Model #{model_id}: Directory not found at '{model_dir}'")
+                log_layer("storage", logging.ERROR, f"Model #{model_id} directory missing on NAS: {model_dir}")
             else:
                 meta_file = model_dir / "metadata.json"
                 if not meta_file.exists():
@@ -393,6 +415,7 @@ class VaultReconciler:
                         "defect": "METADATA_MISSING", "detail": "Embedded metadata.json is missing.",
                     })
                     log(f"[WARN] Model #{model_id}: metadata.json missing.")
+                    log_layer("storage", logging.WARNING, f"Model #{model_id} metadata.json missing.")
 
                 with self._get_db() as conn:
                     expected_files = conn.execute("""
@@ -429,6 +452,7 @@ class VaultReconciler:
                             "defect": "FILE_NOT_FOUND", "detail": "File does not exist at destination.",
                         })
                         log(f"[MISSING] Model #{model_id} file missing: {filename}")
+                        log_layer("storage", logging.ERROR, f"Model #{model_id} File #{file_id} missing on NAS: {file_path}")
                         continue
 
                     try:
@@ -466,12 +490,14 @@ class VaultReconciler:
                                         })
                                         defect_found = True
                                         log(f"[CRC FAILED] Model #{model_id} zip corruption: {filename}")
+                                        log_layer("archive", logging.ERROR, f"Model #{model_id} ZIP CRC failed: {filename} ({bad})")
                             except Exception as ze:
                                 model_issues.append({
                                     "file_id": file_id, "filename": filename, "expected_path": str(file_path),
                                     "defect": "CORRUPT_ARCHIVE", "detail": f"Invalid zip: {ze}",
                                 })
                                 defect_found = True
+                                log_layer("archive", logging.ERROR, f"Model #{model_id} invalid ZIP: {filename}: {ze}")
                         elif ext == ".stl":
                             valid_stl, err_msg = validate_stl_file(file_path)
                             if not valid_stl:
@@ -480,6 +506,7 @@ class VaultReconciler:
                                     "defect": "CORRUPT_STL", "detail": err_msg or "STL mesh verification failed.",
                                 })
                                 defect_found = True
+                                log_layer("archive", logging.WARNING, f"Model #{model_id} STL defect in {filename}: {err_msg}")
 
                         if not defect_found:
                             try:
@@ -492,11 +519,13 @@ class VaultReconciler:
                                             "detail": f"SHA-256 altered: expected {stored_sha256[:10]}..., got {cur_sha[:10]}...",
                                         })
                                         log(f"[BIT-ROT] Checksum mismatch on Model #{model_id}: {filename}")
+                                        log_layer("storage", logging.ERROR, f"BIT-ROT Model #{model_id}: {filename} (expected {stored_sha256[:10]}..., got {cur_sha[:10]}...)")
                                 else:
                                     with self._get_db() as uconn:
                                         with uconn:
                                             uconn.execute("UPDATE downloaded_files SET sha256 = ? WHERE file_id = ?;", (cur_sha, file_id))
                                     baselined_hashes += 1
+                                    log_layer("storage", logging.DEBUG, f"Baselined SHA-256 for Model #{model_id}: {filename}")
                             except Exception as sh_err:
                                 log(f"[WARN] SHA-256 error on {filename}: {sh_err}")
 
@@ -526,6 +555,7 @@ class VaultReconciler:
             "untracked_files": [],
         }
         self._save_run_snapshot("completed", scan_mode, report)
+        log_layer("storage", logging.INFO, f"Forward audit ({scan_mode.upper()}) complete: {healthy_count}/{total} healthy, {len(discrepancies)} discrepancies.")
         return report
 
     def _save_run_snapshot(self, status: str, scan_mode: str, report_data: Dict[str, Any]):
@@ -591,6 +621,7 @@ class VaultReconciler:
                         INSERT INTO download_audit_log (model_id, attempt_number, status, error_detail)
                         VALUES (?, 1, 'failed', 'Reconciliation reset: model marked for re-download');
                     """, (mid,))
+        log_layer("sql", logging.INFO, f"Reset {len(clean_ids)} reconciliation models for re-download: {clean_ids}")
         return {"success": True, "reset_count": len(clean_ids)}
 
     def delete_orphan_directories(self, paths: List[str]) -> Dict[str, Any]:
@@ -603,10 +634,12 @@ class VaultReconciler:
                 target = Path(p_str).resolve()
                 if not target.is_relative_to(nas_root) or target == nas_root:
                     errors.append(f"Security: Refusing deletion outside vault root: {target}")
+                    log_layer("storage", logging.ERROR, f"Refused orphan deletion outside NAS root: {target}")
                     continue
                 if target.exists() and target.is_dir():
                     shutil.rmtree(target)
                     deleted.append(str(target))
+                    log_layer("storage", logging.INFO, f"Deleted orphan directory: {target}")
                     parent = target.parent
                     while parent != nas_root and parent.is_relative_to(nas_root):
                         if parent.exists() and not any(parent.iterdir()):
@@ -616,6 +649,7 @@ class VaultReconciler:
                             break
             except Exception as e:
                 errors.append(f"Failed deleting {p_str}: {e}")
+                log_layer("storage", logging.ERROR, f"Failed deleting orphan {p_str}: {e}")
         return {"success": True, "deleted_count": len(deleted), "errors": errors}
 
     def ingest_untracked_files(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -662,8 +696,10 @@ class VaultReconciler:
                         """, (new_file_id, model_id, filename, filename, rel_p, sz, sz, ext, str(fpath), sha))
                         conn.execute("UPDATE models SET vault_path = ? WHERE id = ?;", (str(fpath.parent.parent), model_id))
                     ingested.append(fpath_str)
+                    log_layer("storage", logging.INFO, f"Ingested untracked file: {fpath.name} -> Model #{model_id}")
                 except Exception as e:
                     errors.append(f"Failed ingesting {fpath_str}: {e}")
+                    log_layer("storage", logging.ERROR, f"Failed ingesting untracked file {fpath_str}: {e}")
         return {"success": True, "ingested_count": len(ingested), "errors": errors}
 
     def scan_staging_garbage(self) -> Dict[str, Any]:
@@ -704,6 +740,7 @@ class VaultReconciler:
                         "name": folder.name, "size_bytes": sz, "reason": f"Abandoned staged folder (Job status: {status})"
                     })
 
+        log_layer("storage", logging.DEBUG, f"Staging garbage scan: {len(garbage_items)} items, {total_bytes} bytes reclaimable.")
         return {"success": True, "total_items": len(garbage_items), "total_bytes": total_bytes, "items": garbage_items}
 
     def purge_staging_garbage(self, target_paths: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -728,6 +765,9 @@ class VaultReconciler:
                     purged += 1
             except Exception as e:
                 errors.append(str(e))
+                log_layer("storage", logging.ERROR, f"Staging purge error on {p_str}: {e}")
+
+        log_layer("storage", logging.INFO, f"Staging garbage purged: {purged} targets removed, {reclaimed} bytes reclaimed.")
         return {"success": True, "purged_count": purged, "reclaimed_bytes": reclaimed, "errors": errors}
 
     def scan_path_drift(self) -> Dict[str, Any]:
@@ -749,6 +789,7 @@ class VaultReconciler:
                     "model_id": mid, "model_name": m["name"], "current_path": str(cur),
                     "canonical_path": str(canonical), "reasons": reasons or ["Path deviates from standard"]
                 })
+        log_layer("storage", logging.DEBUG, f"Path drift scan found {len(drift_items)} deviations.")
         return {"success": True, "total_drifts": len(drift_items), "items": drift_items}
 
     def realign_model_paths(self, model_ids: Optional[List[int]] = None) -> Dict[str, Any]:
@@ -778,8 +819,10 @@ class VaultReconciler:
                                 UPDATE downloaded_files SET vault_path = ?, local_relative_path = ? WHERE file_id = ?;
                             """, (str(canon / "files" / f["cleaned_filename"]), str(rel_nas / "files" / f["cleaned_filename"]), f["file_id"]))
                     realigned += 1
+                    log_layer("storage", logging.INFO, f"Realigned Model #{mid} storage path to: {canon}")
                 except Exception as e:
                     errors.append(f"Model #{mid}: {e}")
+                    log_layer("storage", logging.ERROR, f"Path realign failed for Model #{mid}: {e}")
         return {"success": True, "realigned_count": realigned, "errors": errors}
 
     # -------------------------------------------------------------------------
@@ -838,6 +881,7 @@ class VaultReconciler:
         total = len(archive_rows)
         if total == 0:
             log("No uninspected archive files found. All vault archives are indexed.")
+            log_layer("archive", logging.INFO, "Archive peek backfill: 0 uninspected archives found.")
             return {
                 "success": True,
                 "total_archives": 0,
@@ -848,6 +892,7 @@ class VaultReconciler:
             }
 
         log(f"Found {total} uninspected archives. Starting retroactive inspection sweep...")
+        log_layer("archive", logging.INFO, f"Starting archive inspection sweep across {total} files.")
 
         inspected = 0
         submodels_created = 0
@@ -876,6 +921,7 @@ class VaultReconciler:
                 else:
                     err_msg = f"Archive file missing on disk: {vault_path_str}"
                     log(f"[WARN] Model #{model_id}: {err_msg}")
+                    log_layer("storage", logging.WARNING, f"Archive missing for Model #{model_id}: {vault_path_str}")
                     errors.append(err_msg)
                     continue
 
@@ -888,13 +934,16 @@ class VaultReconciler:
                     submodels_created += sm_count
                     images_extracted += img_count
                     log(f"Model #{model_id} ('{cleaned_filename}'): Indexed {sm_count} submodels, extracted {img_count} renders.")
+                    log_layer("archive", logging.DEBUG, f"Backfilled Model #{model_id} ({cleaned_filename}): {sm_count} submodels, {img_count} renders")
                 else:
                     err_msg = peek_res.get("error", "Unknown peeker error")
                     log(f"[WARN] Model #{model_id} ('{cleaned_filename}'): {err_msg}")
+                    log_layer("archive", logging.WARNING, f"Peeker error on Model #{model_id}: {err_msg}")
                     errors.append(f"Model #{model_id} ({cleaned_filename}): {err_msg}")
             except Exception as e:
                 err_msg = f"Exception reading archive: {e}"
                 log(f"[ERROR] Model #{model_id} ('{cleaned_filename}'): {err_msg}")
+                log_layer("archive", logging.ERROR, f"Archive peek exception for Model #{model_id}: {e}")
                 errors.append(f"Model #{model_id} ({cleaned_filename}): {err_msg}")
 
         summary = {
@@ -906,10 +955,11 @@ class VaultReconciler:
             "errors": errors,
         }
         log(f"Archive backfill complete: {inspected}/{total} archives processed ({submodels_created} submodels indexed, {images_extracted} images extracted).")
+        log_layer("archive", logging.INFO, f"Archive backfill complete: {inspected}/{total} archives inspected.")
         return summary
 
     # -------------------------------------------------------------------------
-    # NEW: Retroactive Catalog Model Preview Cover Cache Sweep
+    # Retroactive Catalog Model Preview Cover Cache Sweep
     # -------------------------------------------------------------------------
 
     def backfill_catalog_previews(
@@ -919,10 +969,6 @@ class VaultReconciler:
         log_cb: Optional[Callable[[str], None]] = None,
         cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
-        """
-        Retroactively downloads and caches cover.jpg previews for catalog models
-        under previews/<model_id>/cover.jpg using httpx with desktop browser headers.
-        """
         log = log_cb or (lambda _: None)
         progress = progress_cb or (lambda _pct, _lbl: None)
         is_cancelled = cancel_cb or (lambda: False)
@@ -945,7 +991,6 @@ class VaultReconciler:
         with self._get_db() as conn:
             rows = conn.execute(query, params).fetchall()
 
-        # Identify models lacking cover.jpg on disk
         to_fetch = []
         for r in rows:
             mid = r["id"]
@@ -956,6 +1001,7 @@ class VaultReconciler:
         total = len(to_fetch)
         if total == 0:
             log(f"All {len(rows)} model catalog covers are already cached locally.")
+            log_layer("http", logging.INFO, "Catalog preview backfill: 100% of model covers already cached.")
             return {
                 "success": True,
                 "total_models": len(rows),
@@ -965,6 +1011,7 @@ class VaultReconciler:
             }
 
         log(f"Found {total} models missing local cover previews. Beginning download sweep...")
+        log_layer("http", logging.INFO, f"Downloading missing catalog preview covers for {total} models.")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -1001,16 +1048,19 @@ class VaultReconciler:
                         temp_file.replace(target_file)
                         downloaded += 1
                         log(f"[OK] Cached cover for Model #{mid} ({len(resp.content)} bytes)")
+                        log_layer("http", logging.DEBUG, f"Cover downloaded for Model #{mid}: {len(resp.content)} B")
                     else:
                         err_msg = f"HTTP {resp.status_code} fetching preview for Model #{mid}"
                         errors.append(err_msg)
                         log(f"[WARN] {err_msg}")
-                    time.sleep(0.04)  # Modest cooling delay between CDN hits
+                        log_layer("http", logging.WARNING, err_msg)
+                    time.sleep(0.04)
                 except Exception as e:
                     temp_file.unlink(missing_ok=True)
                     err_msg = f"Error fetching cover for Model #{mid}: {e}"
                     errors.append(err_msg)
                     log(f"[ERROR] {err_msg}")
+                    log_layer("http", logging.ERROR, err_msg)
 
         summary = {
             "success": True,
@@ -1020,4 +1070,5 @@ class VaultReconciler:
             "errors": errors,
         }
         log(f"Catalog preview caching sweep complete: {downloaded} covers downloaded, {len(rows) - len(to_fetch)} already cached.")
+        log_layer("http", logging.INFO, f"Catalog cover sweep finished: {downloaded} downloaded, {len(errors)} errors.")
         return summary

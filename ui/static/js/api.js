@@ -1,3 +1,9 @@
+/**
+ * ui/static/js/api.js - Client API transport layer for DESYNC 3D Vault.
+ * Handles REST requests for catalog, tasks, downloads, settings,
+ * in-place external libraries, stash manifests, and ephemeral rendering.
+ */
+
 async function request(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) {
@@ -114,7 +120,10 @@ export async function fetchModelDetail(modelId) {
   return request(`/api/models/detail?id=${encodeURIComponent(modelId)}`);
 }
 
+// -----------------------------------------------------------------------------
 // Archive Peeker & Submodels Inspection
+// -----------------------------------------------------------------------------
+
 export async function fetchArchiveSubmodels(fileId) {
   return request(`/api/models/archives?file_id=${encodeURIComponent(fileId)}`);
 }
@@ -130,6 +139,10 @@ export async function triggerArchivePeekBackfill(modelIds = null) {
     body: JSON.stringify({ model_ids: modelIds }),
   });
 }
+
+// -----------------------------------------------------------------------------
+// Settings & System Configuration
+// -----------------------------------------------------------------------------
 
 export async function fetchSettings() {
   return request('/api/settings');
@@ -148,6 +161,77 @@ export async function browseDirectory(path = '') {
   if (path) params.set('path', path);
   return request(`/api/system/browse?${params.toString()}`);
 }
+
+export async function fetchDirectoryUsage() {
+  const resp = await fetch('/api/settings/directories');
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch directory usage: ${resp.statusText}`);
+  }
+  return await resp.json();
+}
+
+// -----------------------------------------------------------------------------
+// In-Place External Libraries
+// -----------------------------------------------------------------------------
+
+export async function fetchExternalLibraries() {
+  return request('/api/settings/libraries');
+}
+
+export async function addExternalLibrary(payload) {
+  return request('/api/settings/libraries', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteExternalLibrary(libraryId) {
+  return request(`/api/settings/libraries/${libraryId}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+export async function scanExternalLibrary(libraryId) {
+  return request(`/api/settings/libraries/${libraryId}/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+// -----------------------------------------------------------------------------
+// 3D Rendering & Ephemeral View Streaming
+// -----------------------------------------------------------------------------
+
+/**
+ * Caches a persistent 3D model perspective to previews/<model_id>/view_<view>.jpg
+ */
+export async function renderModelView(modelId, view = 'front_left', force = false) {
+  return request(`/api/models/${modelId}/render-view`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ view, force })
+  });
+}
+
+/**
+ * Builds a direct streaming URL for on-demand ephemeral JPEG rendering.
+ * Does not write any persistent file to previews/.
+ */
+export function getEphemeralRenderUrl(sourceType, id, view = 'front_left') {
+  const params = new URLSearchParams({
+    source_type: sourceType,
+    id: String(id),
+    view: view,
+    _t: String(Date.now())
+  });
+  return `/api/render/stl?${params.toString()}`;
+}
+
+// -----------------------------------------------------------------------------
+// Native MMF Authentication
+// -----------------------------------------------------------------------------
 
 export async function fetchAuthStatus() {
   return request('/api/auth/status');
@@ -171,6 +255,10 @@ export async function disconnectAuth() {
     headers: { 'Content-Type': 'application/json' }
   });
 }
+
+// -----------------------------------------------------------------------------
+// Background Pipeline Tasks
+// -----------------------------------------------------------------------------
 
 export async function fetchTasksStatus() {
   return request('/api/tasks/status');
@@ -216,7 +304,10 @@ export async function startIngest(payload = {}) {
   });
 }
 
+// -----------------------------------------------------------------------------
 // Vault Reconciliation
+// -----------------------------------------------------------------------------
+
 export async function runReconcileScan(scanMode = 'fast') {
   return request('/api/reconcile/scan', {
     method: 'POST',
@@ -284,12 +375,12 @@ export async function realignModelPaths(modelIds = null) {
   });
 }
 
-export async function fetchDirectoryUsage() {
-  const resp = await fetch('/api/settings/directories');
-  if (!resp.ok) {
-    throw new Error(`Failed to fetch directory usage: ${resp.statusText}`);
-  }
-  return await resp.json();
+export async function triggerCatalogPreviewBackfill(modelIds = null) {
+  return request('/api/reconcile/catalog-previews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model_ids: modelIds }),
+  });
 }
 
 // -----------------------------------------------------------------------------
@@ -358,10 +449,15 @@ export async function bulkAddStashModels(stashId, modelIds) {
   });
 }
 
-export async function triggerCatalogPreviewBackfill(modelIds = null) {
-  return request('/api/reconcile/catalog-previews', {
+export async function exportStash(stashId, options = {}) {
+  const res = await fetch(`/api/stashes/${stashId}/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model_ids: modelIds }),
+    body: JSON.stringify(options)
   });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return data;
 }

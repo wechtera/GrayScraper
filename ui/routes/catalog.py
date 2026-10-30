@@ -1,16 +1,28 @@
 """
-ui/routes/catalog.py - Catalog, creators, models, releases, and metrics endpoints.
+ui/routes/catalog.py - Catalog, creators, models, releases, metrics, and Blender rendering endpoints.
 Filters out 404/tombstone records and models with missing metadata from UI presentation.
+Preserves 100% of pre-existing catalog exploration and metrics functionality.
 """
 
 from datetime import date, datetime
 import json
 from pathlib import Path
+import shutil
 import sqlite3
-from typing import Any, Optional
+import sys
+import tempfile
+from typing import Any, Dict, Optional, Tuple, Union
+import uuid
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = BASE_DIR.parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from services.downloader import DownloadManager
 from services.analytics import compute_catalog_audit
+from services.mesh_renderer import MeshRenderer, VALID_VIEWS
 
 # Global SQL filters: Exclude tombstones and records with missing designer metadata
 VALID_MODEL_RAW = """
@@ -43,6 +55,10 @@ VALID_RELEASE_R = """
     AND r.designer_name != 'Unknown'
 """
 
+
+# -------------------------------------------------------------------------
+# 1. Core Metrics & Audit Endpoints (Unchanged)
+# -------------------------------------------------------------------------
 
 def handle_get_metrics(
     conn: sqlite3.Connection,
@@ -510,3 +526,188 @@ def handle_get_model_files(
         "total_size_bytes": total_size,
         "files": [dict(f) for f in files],
     }, 200
+
+
+# -------------------------------------------------------------------------
+# 2. Blender Render Endpoints
+# -------------------------------------------------------------------------
+
+def handle_post_model_render_view(
+    conn: sqlite3.Connection,
+    model_id: int,
+    download_manager: Optional[DownloadManager] = None,
+    body: Optional[dict] = None,
+    params: Optional[dict] = None,
+    task_manager: Any = None,
+) -> tuple[dict[str, Any], int]:
+    """
+    POST /api/models/:id/render-view
+    Renders and caches on-demand secondary perspectives to previews/<model_id>/view_<view>.jpg.
+    Scoped strictly to external/in-place models (id >= 2,000,000,000 or source != 'mmf').
+    Guards MMF models since they already possess official photography and API covers.
+    """
+    payload = body or {}
+    view = str(payload.get("view", (params or {}).get("view", ["front_left"])[0])).lower().strip()
+    if view not in VALID_VIEWS:
+        return {"error": f"Invalid view '{view}'. Must be one of: {sorted(VALID_VIEWS)}"}, 400
+
+    force_rerender = bool(payload.get("force", False))
+
+    # Self-healing schema: check if source column exists in models table
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(models);").fetchall()}
+    if "source" not in cols:
+        try:
+            with conn:
+                conn.execute("ALTER TABLE models ADD COLUMN source TEXT DEFAULT 'mmf';")
+            cols.add("source")
+        except Exception:
+            pass
+
+    source_expr = "COALESCE(source, 'mmf') AS source" if "source" in cols else "'mmf' AS source"
+
+    model = conn.execute(f"""
+        SELECT id, name, designer_name, vault_path, primary_image_url,
+               {source_expr}
+        FROM models WHERE id = ?;
+    """, (model_id,)).fetchone()
+
+    if not model:
+        return {"error": f"Model #{model_id} not found."}, 404
+
+    # MMF Guard: MMF models have official photography. Render individual components via /api/render/stl instead.
+    if model["source"] == "mmf" and model_id < 2_000_000_000:
+        return {
+            "error": f"Model #{model_id} is an MMF catalog item with official cover imagery. "
+                     "Root 3D thumbnail rendering is reserved for external libraries. "
+                     "To render individual meshes from this model, use the component-level render button or /api/render/stl."
+        }, 400
+
+    previews_root = (ROOT_DIR / "previews").resolve()
+    model_previews_dir = previews_root / str(model_id)
+    model_previews_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_filename = "cover.jpg" if view == "front_left" else f"view_{view}.jpg"
+    cache_path = model_previews_dir / cache_filename
+
+    if not force_rerender and cache_path.exists() and cache_path.stat().st_size > 0:
+        return {
+            "success": True,
+            "model_id": model_id,
+            "view": view,
+            "image_url": f"/previews/{model_id}/{cache_filename}",
+            "cached": True,
+        }, 200
+
+    renderer = MeshRenderer()
+    if not renderer.is_available():
+        return {"error": "Blender is not installed or not found on host system PATH."}, 503
+
+    candidate_stl: Optional[Path] = None
+    scratch_dir: Optional[Path] = None
+
+    try:
+        # Check if model has loose files in its vault folder
+        if model["vault_path"]:
+            v_path = Path(model["vault_path"])
+            if v_path.exists() and v_path.is_dir():
+                candidate_stl = renderer.select_best_render_candidate(v_path)
+            elif v_path.exists() and v_path.is_file() and v_path.suffix.lower() == ".stl":
+                candidate_stl = v_path
+
+        # Check loose downloaded STL files recorded in SQLite
+        if not candidate_stl:
+            file_rows = conn.execute("""
+                SELECT df.vault_path, df.staging_path
+                FROM downloaded_files df
+                WHERE df.model_id = ?
+                  AND (LOWER(df.file_extension) = '.stl' OR LOWER(df.cleaned_filename) LIKE '%.stl')
+                ORDER BY df.actual_bytes DESC;
+            """, (model_id,)).fetchall()
+
+            for fr in file_rows:
+                for p_str in (fr["vault_path"], fr["staging_path"]):
+                    if p_str:
+                        c = Path(p_str)
+                        if c.exists() and c.is_file() and c.suffix.lower() == ".stl":
+                            candidate_stl = c
+                            break
+                if candidate_stl:
+                    break
+
+        # Check inside downloaded archives (.zip, .rar, .7z)
+        if not candidate_stl:
+            scratch_dir = Path(tempfile.gettempdir()) / f".desync_scratch_{uuid.uuid4().hex[:12]}"
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            candidate_stl = renderer._resolve_model_stl_candidate(conn, model_id, scratch_dir)
+
+        if not candidate_stl or not candidate_stl.exists():
+            return {"error": f"No candidate STL mesh found on storage for Model #{model_id}."}, 404
+
+        success = renderer.render_view(stl_path=candidate_stl, view=view, output_image_path=cache_path)
+        if not success or not cache_path.exists() or cache_path.stat().st_size == 0:
+            return {"error": f"Blender failed rendering view '{view}' for Model #{model_id}."}, 500
+
+        if view == "front_left" and not model["primary_image_url"]:
+            with conn:
+                conn.execute("UPDATE models SET primary_image_url = ? WHERE id = ?;", (f"/previews/{model_id}/cover.jpg", model_id))
+
+        return {
+            "success": True,
+            "model_id": model_id,
+            "view": view,
+            "image_url": f"/previews/{model_id}/{cache_filename}",
+            "cached": False,
+        }, 200
+
+    finally:
+        if scratch_dir and scratch_dir.exists():
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+def handle_post_render_stl(
+    conn: sqlite3.Connection,
+    download_manager: Optional[DownloadManager] = None,
+    body: Optional[dict] = None,
+    params: Optional[dict] = None,
+    task_manager: Any = None,
+) -> Union[Tuple[bytes, int, Dict[str, str]], Tuple[Dict[str, Any], int]]:
+    """
+    POST/GET /api/render/stl
+    Universal Ephemeral Render API:
+    Renders individual STL components, submodel parts, or archive members on the fly.
+    Returns JPEG image stream directly (Content-Type: image/jpeg) with zero permanent disk footprint.
+    """
+    payload = body or {}
+    q_params = params or {}
+
+    source_type = str(payload.get("source_type", q_params.get("source_type", ["file"])[0])).lower().strip()
+    if source_type not in ("file", "archive_member"):
+        return {"error": "Invalid source_type. Must be 'file' or 'archive_member'."}, 400
+
+    raw_id = payload.get("id", payload.get("file_id", payload.get("member_id", q_params.get("id", [""])[0])))
+    if not raw_id or not str(raw_id).isdigit():
+        return {"error": "Valid numeric 'id' is required."}, 400
+    source_id = int(raw_id)
+
+    view = str(payload.get("view", q_params.get("view", ["front_left"])[0])).lower().strip()
+    if view not in VALID_VIEWS:
+        view = "front_left"
+
+    renderer = MeshRenderer()
+    if not renderer.is_available():
+        return {"error": "Blender is not installed or not found on host system PATH."}, 503
+
+    try:
+        jpeg_bytes = renderer.render_ephemeral(
+            conn=conn,
+            source_type=source_type,
+            source_id=source_id,
+            view=view,
+        )
+        return jpeg_bytes, 200, {"Content-Type": "image/jpeg", "Cache-Control": "no-store"}
+    except FileNotFoundError as fnf:
+        return {"error": str(fnf)}, 404
+    except ValueError as ve:
+        return {"error": str(ve)}, 400
+    except Exception as e:
+        return {"error": f"Ephemeral rendering failed: {str(e)}"}, 500

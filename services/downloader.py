@@ -1,11 +1,13 @@
 """
 services/downloader.py - Decoupled background download manager for 3D digital assets.
 Supports OAuth 2.0 Bearer authenticated downloads, live URL hydration, and dual-tier staging.
+Instrumented with dynamic topic-based subsystem logging ('http', 'storage', 'archive').
 """
 
 from datetime import datetime
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -19,6 +21,8 @@ import urllib.parse
 import zipfile
 
 import httpx
+
+from services.logger import log_layer, logger
 
 try:
     from .archive_peeker import ArchivePeeker
@@ -154,6 +158,7 @@ class DiskAdopter:
                 VALUES (?, ?, 1, 'adopted', 200, CURRENT_TIMESTAMP);
             """, (model_id, file_id))
 
+        log_layer("storage", logging.INFO, f"Adopted pre-existing file on disk: {target_path.name} (Model #{model_id})")
         return True
 
 
@@ -262,7 +267,9 @@ class DownloadManager:
                     f"DELETE FROM download_jobs WHERE model_id IN ({placeholders}) AND status NOT IN ('downloading', 'completed');",
                     model_ids,
                 )
-                return cur.rowcount
+                removed = cur.rowcount
+                log_layer("storage", logging.INFO, f"Dequeued {removed} models from transfer queue.")
+                return removed
 
     def clear_queue(self, status: Optional[str] = None) -> int:
         """Purges jobs by status, preserving completed and in-flight downloads."""
@@ -272,7 +279,9 @@ class DownloadManager:
                     cur = conn.execute("DELETE FROM download_jobs WHERE status = ?;", (status,))
                 else:
                     cur = conn.execute("DELETE FROM download_jobs WHERE status NOT IN ('downloading', 'completed');")
-                return cur.rowcount
+                purged = cur.rowcount
+                log_layer("storage", logging.INFO, f"Purged {purged} queue records (Filter: {status or 'all incomplete'}).")
+                return purged
 
     def _download_single_file(
         self,
@@ -299,6 +308,8 @@ class DownloadManager:
         if self.access_token and "Authorization" not in req_headers:
             req_headers["Authorization"] = f"Bearer {self.access_token}"
 
+        log_layer("http", logging.DEBUG, f"Starting stream for Model #{model_id} File #{file_id} ({cleaned_filename})")
+
         for attempt in range(1, 3):
             try:
                 with httpx.Client(headers=req_headers, cookies=cookies, follow_redirects=True, timeout=30.0) as client:
@@ -309,6 +320,7 @@ class DownloadManager:
                                 if self.access_token else
                                 f"Cloudflare auth failure (HTTP {resp.status_code})"
                             )
+                            log_layer("http", logging.ERROR, f"Stream auth tripped for Model #{model_id}: {reason}")
                             self.trip_circuit_breaker(reason)
                             with self._get_db() as conn:
                                 with conn:
@@ -322,6 +334,7 @@ class DownloadManager:
                             return False
 
                         if resp.status_code != 200:
+                            log_layer("http", logging.WARNING, f"HTTP {resp.status_code} on Model #{model_id} File #{file_id} (Attempt {attempt}/2)")
                             with self._get_db() as conn:
                                 with conn:
                                     status_str = "retry_scheduled" if attempt == 1 else "failed"
@@ -341,8 +354,10 @@ class DownloadManager:
                                 f.write(chunk)
 
                 if file_ext == "ZIP":
+                    log_layer("archive", logging.DEBUG, f"Checking ZIP CRC integrity for Model #{model_id}: {cleaned_filename}")
                     valid, _, err = FileValidator.validate_zip(part_path)
                     if not valid:
+                        log_layer("archive", logging.WARNING, f"Corrupted ZIP on Model #{model_id} ({cleaned_filename}): {err}")
                         if part_path.exists():
                             part_path.unlink()
                         with self._get_db() as conn:
@@ -359,6 +374,7 @@ class DownloadManager:
 
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(part_path), str(target_path))
+                log_layer("storage", logging.DEBUG, f"Promoted part file to target: {target_path.name}")
 
                 with self._get_db() as conn:
                     with conn:
@@ -398,6 +414,7 @@ class DownloadManager:
                 return True
 
             except Exception as e:
+                log_layer("http", logging.ERROR, f"Download failure on Model #{model_id} File #{file_id}: {e}")
                 if part_path.exists():
                     part_path.unlink()
                 with self._get_db() as conn:
@@ -461,6 +478,8 @@ class DownloadManager:
             except Exception:
                 self.cookies = {}
 
+        log_layer("storage", logging.DEBUG, f"Engine settings loaded: Workers={self.worker_concurrency}, Offloaders={self.offloader_concurrency}, OAuth={'YES' if self.access_token else 'NO'}")
+
     def is_circuit_breaker_tripped(self) -> bool:
         with self._get_db() as conn:
             row = conn.execute("SELECT value FROM app_settings WHERE key = 'circuit_breaker_tripped'").fetchone()
@@ -476,13 +495,13 @@ class DownloadManager:
                 INSERT INTO app_settings (key, value, updated_at) VALUES ('circuit_breaker_reason', ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP;
             """, (reason,))
-        print(f"[Circuit Breaker] TRIPPED: {reason}")
+        logger.error(f"[Circuit Breaker] TRIPPED: {reason}")
 
     def reset_circuit_breaker(self):
         with self._get_db() as conn:
             conn.execute("UPDATE app_settings SET value = '0' WHERE key = 'circuit_breaker_tripped';")
             conn.execute("UPDATE app_settings SET value = '' WHERE key = 'circuit_breaker_reason';")
-        print("[Circuit Breaker] Reset by operator.")
+        logger.info("[Circuit Breaker] Reset by operator.")
 
     def start(self):
         if self.is_running:
@@ -504,17 +523,19 @@ class DownloadManager:
             t.start()
 
         auth_mode = "OAuth Bearer Token" if self.access_token else "Cookie Fallback"
-        print(f"[DownloadManager] Started {self.worker_concurrency} download workers ({auth_mode}) and {self.offloader_concurrency} NAS offloaders.")
+        logger.info(f"[DownloadManager] Started {self.worker_concurrency} download workers ({auth_mode}) and {self.offloader_concurrency} NAS offloaders.")
 
     def stop(self):
         self.is_running = False
 
     def pause(self):
         self.is_paused = True
+        logger.info("[DownloadManager] Engine paused by operator.")
 
     def resume(self):
         self._load_settings()
         self.is_paused = False
+        logger.info("[DownloadManager] Engine resumed by operator.")
 
     def _get_model_meta_query_parts(self, conn: sqlite3.Connection) -> tuple[str, str, str]:
         """Maps designer_name directly from models table."""
@@ -579,6 +600,8 @@ class DownloadManager:
                 continue
 
             model_id = job["model_id"]
+            log_layer("storage", logging.DEBUG, f"Worker #{worker_id}: Claimed Model #{model_id} ('{job['model_name']}')")
+
             with self._lock:
                 self.active_downloads[worker_id] = {
                     "model_id": model_id,
@@ -613,6 +636,7 @@ class DownloadManager:
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             }
             try:
+                log_layer("http", logging.DEBUG, f"Worker #{worker_id}: Refreshing live OAuth download URLs for Model #{model_id}")
                 with httpx.Client(timeout=15.0, follow_redirects=True) as meta_client:
                     resp = meta_client.get(api_url, headers=auth_headers)
                     if resp.status_code == 200:
@@ -643,11 +667,12 @@ class DownloadManager:
                                                 size_bytes = COALESCE(?, size_bytes)
                                             WHERE file_id = ?;
                                         """, (rf_url, rf_size, rf_id))
+                        log_layer("http", logging.DEBUG, f"Worker #{worker_id}: Live URLs updated for Model #{model_id} (ArchiveURL={bool(archive_dl_url)})")
                     elif resp.status_code == 401:
                         self.trip_circuit_breaker("MyMiniFactory OAuth token expired (HTTP 401). Please re-authenticate in Settings.")
                         raise RuntimeError("OAuth token expired (HTTP 401)")
             except httpx.RequestError as req_err:
-                print(f"[DownloadWorker {worker_id}] Notice: Could not refresh live OAuth metadata for Model #{model_id}: {req_err}")
+                log_layer("http", logging.WARNING, f"Worker #{worker_id}: Could not refresh live OAuth metadata for Model #{model_id}: {req_err}")
 
         with self._get_db() as conn:
             files = conn.execute("""
@@ -671,6 +696,7 @@ class DownloadManager:
                         SELECT mf.file_id, mf.filename, mf.download_url, mf.size_bytes
                         FROM model_files mf WHERE mf.model_id = ?;
                     """, (model_id,)).fetchall()
+                    log_layer("archive", logging.INFO, f"Adopted archive_download_url as synthetic bundle '{archive_filename}' for Model #{model_id}")
 
         if not files:
             raise RuntimeError(f"No file metadata recorded for Model ID {model_id}")
@@ -714,6 +740,8 @@ class DownloadManager:
                 bytes_received = 0
                 hasher = hashlib.sha256()
 
+                log_layer("http", logging.DEBUG, f"Worker #{worker_id}: Streaming {cleaned_name} ({expected_size} B) for Model #{model_id}")
+
                 with client.stream("GET", dl_url) as resp:
                     if resp.status_code in (401, 403):
                         reason = (
@@ -743,6 +771,7 @@ class DownloadManager:
                                     self.active_downloads[worker_id]["speed_bps"] = speed
 
                 file_sha256 = hasher.hexdigest()
+                log_layer("storage", logging.DEBUG, f"Worker #{worker_id}: In-flight buffer finished for {cleaned_name} (SHA-256: {file_sha256[:10]}...)")
 
                 ext = Path(cleaned_name).suffix.lower()
                 if ext == ".zip":
@@ -753,6 +782,7 @@ class DownloadManager:
                                 raise zipfile.BadZipFile(f"Corrupt entry in archive: {bad_file}")
                     except Exception as e:
                         part_path.unlink(missing_ok=True)
+                        log_layer("archive", logging.ERROR, f"Worker #{worker_id}: ZIP CRC failed on {cleaned_name}: {e}")
                         raise RuntimeError(f"ZIP validation failed for {cleaned_name}: {e}")
 
                 shutil.move(str(part_path), str(staged_path))
@@ -764,21 +794,21 @@ class DownloadManager:
                         peek_res = peeker.inspect_and_record(model_id, file_id, staged_path)
                         if not peek_res.get("success"):
                             warn_msg = f"Archive peaking notice for file {file_id}: {peek_res.get('error')}"
-                            print(f"[DownloadWorker {worker_id}] [WARN] {warn_msg}")
+                            log_layer("archive", logging.WARNING, f"Worker #{worker_id}: {warn_msg}")
                             with self._get_db() as conn:
                                 conn.execute("""
                                     INSERT INTO download_audit_log (model_id, attempt_number, status, error_detail)
                                     VALUES (?, 1, 'warning', ?);
                                 """, (model_id, warn_msg))
                         else:
-                            print(
-                                f"[DownloadWorker {worker_id}] Peaked into {cleaned_name}: "
-                                f"Indexed {peek_res.get('submodels_count')} submodels, "
-                                f"extracted {peek_res.get('images_extracted')} previews."
+                            log_layer(
+                                "archive",
+                                logging.INFO,
+                                f"Worker #{worker_id}: Peaked into {cleaned_name} - Indexed {peek_res.get('submodels_count')} submodels, extracted {peek_res.get('images_extracted')} previews."
                             )
                     except Exception as pe:
                         warn_msg = f"Archive peaking failed for {cleaned_name}: {pe}"
-                        print(f"[DownloadWorker {worker_id}] [WARN] {warn_msg}")
+                        log_layer("archive", logging.WARNING, f"Worker #{worker_id}: {warn_msg}")
                         try:
                             with self._get_db() as conn:
                                 conn.execute("""
@@ -838,7 +868,10 @@ class DownloadManager:
                     WHERE id = ?;
                 """, (len(staged_files_info), downloaded_bytes_acc, total_bytes, job["id"]))
 
+        log_layer("storage", logging.INFO, f"Worker #{worker_id}: Model #{model_id} staging complete ({len(staged_files_info)} files, {downloaded_bytes_acc} bytes). Queued for NAS offload.")
+
     def _handle_download_failure(self, job_id: int, model_id: int, error_msg: str):
+        logger.error(f"[DownloadManager] Job #{job_id} (Model #{model_id}) failed: {error_msg}")
         with self._get_db() as conn:
             conn.execute("""
                 UPDATE download_jobs
@@ -886,6 +919,8 @@ class DownloadManager:
                 continue
 
             model_id = job["model_id"]
+            log_layer("storage", logging.DEBUG, f"Offloader #{worker_id}: Claimed Model #{model_id} for NAS transfer")
+
             with self._lock:
                 self.active_offloads[worker_id] = {
                     "model_id": model_id,
@@ -900,7 +935,7 @@ class DownloadManager:
             try:
                 self._process_nas_offload(worker_id, job, nas_root)
             except Exception as e:
-                print(f"[OffloadWorker {worker_id}] Network transfer interrupted for Model #{model_id}: {e}")
+                log_layer("storage", logging.ERROR, f"Offloader #{worker_id}: Transfer failed for Model #{model_id}: {e}")
                 with self._get_db() as conn:
                     conn.execute("""
                         UPDATE download_jobs SET status = 'staging_complete', error_message = ? WHERE id = ?;
@@ -1040,6 +1075,8 @@ class DownloadManager:
                     INSERT INTO download_audit_log (model_id, attempt_number, status, error_detail)
                     VALUES (?, 1, 'completed', ?);
                 """, (model_id, f"Archived to: {model_dest_dir}"))
+
+        log_layer("storage", logging.INFO, f"Offloader #{worker_id}: Model #{model_id} permanently archived to {model_dest_dir}")
 
     def get_status(self) -> Dict[str, Any]:
         with self._get_db() as conn:

@@ -1,7 +1,7 @@
 """
-ui/services/stash_service.py - Core engine service for the Stash system ("A pile of gray").
+services/stash_service.py - Core engine service for the Stash system ("A pile of gray").
 Manages persistent staging manifests, active pointer persistence, polymorphic line items,
-duplicate detection, and volume aggregation.
+duplicate detection, volume aggregation, and download verification guardrails.
 """
 
 import os
@@ -11,7 +11,7 @@ import sys
 from typing import Any, Dict, List, Optional, Union
 
 BASE_DIR = Path(__file__).resolve().parent
-ROOT_DIR = BASE_DIR.parent.parent
+ROOT_DIR = BASE_DIR.parent
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -85,6 +85,92 @@ class StashService:
             with self._get_connection() as local_conn:
                 with local_conn:
                     local_conn.executescript(ddl)
+
+    # -------------------------------------------------------------------------
+    # Guardrail Verification Helpers
+    # -------------------------------------------------------------------------
+
+    def _has_vault_columns(self, conn: sqlite3.Connection) -> bool:
+        """Checks if the catalog database contains vault storage schema (models.vault_path and downloaded_files)."""
+        try:
+            m_cols = {r[1] for r in conn.execute("PRAGMA table_info(models);").fetchall()}
+            if "vault_path" not in m_cols:
+                return False
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
+            if "downloaded_files" not in tables:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _verify_model_downloaded(self, conn: sqlite3.Connection, model_id: int):
+        if not self._has_vault_columns(conn):
+            return
+
+        row = conn.execute("SELECT id, name, vault_path FROM models WHERE id = ?;", (model_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Model #{model_id} does not exist in library.")
+
+        vault_path = row["vault_path"]
+        if not vault_path:
+            raise ValueError(f"Model #{model_id} must be archived in the vault before adding to a stash.")
+
+        p = Path(vault_path)
+        if not p.exists() or not p.is_dir():
+            raise ValueError(f"Model #{model_id} vault directory not found on storage: {vault_path}")
+
+    def _verify_file_downloaded(self, conn: sqlite3.Connection, file_id: int):
+        if not self._has_vault_columns(conn):
+            return
+
+        row = conn.execute("""
+            SELECT file_id, vault_path, staging_path, storage_tier
+            FROM downloaded_files
+            WHERE file_id = ?;
+        """, (file_id,)).fetchone()
+
+        if not row or row["storage_tier"] not in ("nas", "local"):
+            raise ValueError(f"File #{file_id} must be downloaded before adding to a stash.")
+
+        target = Path(row["vault_path"]) if (row["storage_tier"] == "nas" and row["vault_path"]) else Path(row["staging_path"] or "")
+        if not target or not target.exists() or not target.is_file():
+            raise ValueError(f"File #{file_id} must be downloaded before adding to a stash.")
+
+    def _verify_submodel_downloaded(self, conn: sqlite3.Connection, submodel_id: int, file_id: Optional[int]):
+        if not self._has_vault_columns(conn):
+            return
+
+        resolved_file_id = file_id
+        if resolved_file_id is None:
+            row = conn.execute("SELECT file_id FROM file_archive_submodels WHERE id = ?;", (submodel_id,)).fetchone()
+            if row:
+                resolved_file_id = row["file_id"]
+
+        if resolved_file_id is None:
+            raise ValueError(f"Submodel #{submodel_id} has no registered parent archive file.")
+
+        try:
+            self._verify_file_downloaded(conn, resolved_file_id)
+        except ValueError:
+            raise ValueError(f"Parent archive for submodel #{submodel_id} must be downloaded before adding to a stash.")
+
+    def _verify_archive_member_downloaded(self, conn: sqlite3.Connection, archive_member_id: int, file_id: Optional[int]):
+        if not self._has_vault_columns(conn):
+            return
+
+        resolved_file_id = file_id
+        if resolved_file_id is None:
+            row = conn.execute("SELECT file_id FROM file_archive_members WHERE id = ?;", (archive_member_id,)).fetchone()
+            if row:
+                resolved_file_id = row["file_id"]
+
+        if resolved_file_id is None:
+            raise ValueError(f"Archive member #{archive_member_id} has no registered parent archive file.")
+
+        try:
+            self._verify_file_downloaded(conn, resolved_file_id)
+        except ValueError:
+            raise ValueError(f"Parent archive for archive member #{archive_member_id} must be downloaded before adding to a stash.")
 
     # -------------------------------------------------------------------------
     # Stash Manifest Lifecycle
@@ -409,7 +495,7 @@ class StashService:
             return _execute(local_conn)
 
     # -------------------------------------------------------------------------
-    # Stash Item Mutations
+    # Stash Item Mutations (with Download Verification Guardrails)
     # -------------------------------------------------------------------------
 
     def add_to_stash(
@@ -422,8 +508,12 @@ class StashService:
         archive_member_id: Optional[int] = None,
         notes: str = "",
         conn: Optional[sqlite3.Connection] = None,
+        db_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
-        """Adds a polymorphic item to a stash, enforcing uniqueness and returning friendly status."""
+        """Adds a polymorphic item to a stash, enforcing download guardrails and uniqueness."""
+        if db_path is not None:
+            self.db_path = Path(db_path).resolve()
+
         valid_types = {"model", "file", "submodel", "archive_member"}
         if item_type not in valid_types:
             raise ValueError(f"Invalid item_type '{item_type}'. Must be one of {valid_types}.")
@@ -435,7 +525,7 @@ class StashService:
             if not stash:
                 raise ValueError(f"Stash #{stash_id} does not exist.")
 
-            # Validate foreign references before insertion
+            # Validate foreign reference existence
             model = c.execute("SELECT id FROM models WHERE id = ?;", (model_id,)).fetchone()
             if not model:
                 raise ValueError(f"Model #{model_id} does not exist in library.")
@@ -455,6 +545,17 @@ class StashService:
                 if not mem_row:
                     raise ValueError(f"Archive member #{archive_member_id} does not exist.")
 
+            # Enforce Download Verification Guardrails (when vault schema is present)
+            clean_type = item_type.strip().lower()
+            if clean_type == "model":
+                self._verify_model_downloaded(c, model_id)
+            elif clean_type == "file":
+                self._verify_file_downloaded(c, file_id)
+            elif clean_type == "submodel":
+                self._verify_submodel_downloaded(c, submodel_id, file_id)
+            elif clean_type == "archive_member":
+                self._verify_archive_member_downloaded(c, archive_member_id, file_id)
+
             # Duplicate check
             existing = c.execute(
                 """
@@ -468,7 +569,7 @@ class StashService:
                 """,
                 (
                     stash_id,
-                    item_type,
+                    clean_type,
                     model_id,
                     file_id or 0,
                     submodel_id or 0,
@@ -480,6 +581,7 @@ class StashService:
                 return {
                     "success": False,
                     "already_exists": True,
+                    "duplicate": True,
                     "message": "Already pending paint in this stash.",
                     "item_id": existing["id"],
                     "stash_id": stash_id,
@@ -494,19 +596,20 @@ class StashService:
                         archive_member_id, notes, added_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
                     """,
-                    (stash_id, item_type, model_id, file_id, submodel_id, archive_member_id, clean_notes),
+                    (stash_id, clean_type, model_id, file_id, submodel_id, archive_member_id, clean_notes),
                 )
                 item_id = cur.lastrowid
                 c.execute("UPDATE stashes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (stash_id,))
 
-                return {
-                    "success": True,
-                    "already_exists": False,
-                    "message": "Added to stash.",
-                    "item_id": item_id,
-                    "stash_id": stash_id,
-                    "stash_name": stash["name"],
-                }
+                row = c.execute("SELECT * FROM stash_items WHERE id = ?;", (item_id,)).fetchone()
+                data = dict(row)
+                data["item_id"] = item_id
+                data["stash_name"] = stash["name"]
+                data["already_exists"] = False
+                data["duplicate"] = False
+                data["success"] = True
+                data["message"] = "Added to stash."
+                return data
 
         if conn:
             return _execute(conn)
@@ -540,37 +643,88 @@ class StashService:
         model_ids: List[int],
         conn: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, Any]:
-        """Atomically adds multiple entire models to a stash manifest."""
+        """Atomically adds multiple entire models to a stash manifest, skipping un-downloaded items."""
 
         def _execute(c: sqlite3.Connection) -> Dict[str, Any]:
             stash = c.execute("SELECT id, name FROM stashes WHERE id = ?;", (stash_id,)).fetchone()
             if not stash:
                 raise ValueError(f"Stash #{stash_id} does not exist.")
 
+            clean_ids = list(dict.fromkeys([int(m) for m in model_ids if str(m).isdigit()]))
+            if not clean_ids:
+                return {
+                    "success": True,
+                    "stash_id": stash_id,
+                    "stash_name": stash["name"],
+                    "added": 0,
+                    "added_count": 0,
+                    "added_models": [],
+                    "duplicates": 0,
+                    "total": 0,
+                    "skipped_undownloaded": [],
+                    "message": "No model IDs submitted.",
+                }
+
+            has_vault = self._has_vault_columns(c)
             added = 0
             duplicates = 0
+            added_models = []
+            skipped_undownloaded = []
 
-            with c:
-                for mid in model_ids:
-                    existing = c.execute(
-                        """
-                        SELECT id FROM stash_items
-                        WHERE stash_id = ? AND item_type = 'model' AND model_id = ?;
-                        """,
-                        (stash_id, mid),
-                    ).fetchone()
+            placeholders = ",".join("?" for _ in clean_ids)
+            dupe_query = f"SELECT model_id FROM stash_items WHERE stash_id = ? AND item_type = 'model' AND model_id IN ({placeholders});"
+            existing_dupes = {r["model_id"] for r in c.execute(dupe_query, [stash_id] + clean_ids).fetchall()}
 
-                    if existing:
+            if has_vault:
+                models_query = f"SELECT id, name, vault_path FROM models WHERE id IN ({placeholders});"
+                m_rows = {r["id"]: r for r in c.execute(models_query, clean_ids).fetchall()}
+
+                for mid in clean_ids:
+                    row = m_rows.get(mid)
+                    if not row or not row["vault_path"]:
+                        skipped_undownloaded.append({
+                            "model_id": mid,
+                            "name": row["name"] if row else f"Model #{mid}",
+                            "reason": "Not archived in vault",
+                        })
+                        continue
+
+                    v_path = Path(row["vault_path"])
+                    if not v_path.exists() or not v_path.is_dir():
+                        skipped_undownloaded.append({
+                            "model_id": mid,
+                            "name": row["name"],
+                            "reason": f"Vault path not accessible on disk: {v_path}",
+                        })
+                        continue
+
+                    if mid in existing_dupes:
                         duplicates += 1
                     else:
-                        c.execute(
-                            """
-                            INSERT INTO stash_items (stash_id, item_type, model_id, added_at)
-                            VALUES (?, 'model', ?, CURRENT_TIMESTAMP);
-                            """,
-                            (stash_id, mid),
-                        )
-                        added += 1
+                        added_models.append(mid)
+
+                if len(added_models) == 0 and len(skipped_undownloaded) == len(clean_ids):
+                    raise ValueError(
+                        f"None of the {len(clean_ids)} selected models are archived in the vault. "
+                        "Models must be downloaded to the vault before adding to a stash."
+                    )
+            else:
+                for mid in clean_ids:
+                    if mid in existing_dupes:
+                        duplicates += 1
+                    else:
+                        added_models.append(mid)
+
+            with c:
+                for mid in added_models:
+                    c.execute(
+                        """
+                        INSERT INTO stash_items (stash_id, item_type, model_id, added_at)
+                        VALUES (?, 'model', ?, CURRENT_TIMESTAMP);
+                        """,
+                        (stash_id, mid),
+                    )
+                    added += 1
 
                 if added > 0:
                     c.execute("UPDATE stashes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (stash_id,))
@@ -580,8 +734,16 @@ class StashService:
                 "stash_id": stash_id,
                 "stash_name": stash["name"],
                 "added": added,
+                "added_count": added,
+                "added_models": added_models,
                 "duplicates": duplicates,
                 "total": len(model_ids),
+                "skipped_undownloaded": skipped_undownloaded,
+                "message": (
+                    f"Added {added} models to '{stash['name']}' "
+                    f"({len(skipped_undownloaded)} skipped: not in vault, "
+                    f"{duplicates} duplicates)."
+                ),
             }
 
         if conn:

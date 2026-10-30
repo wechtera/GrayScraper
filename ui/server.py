@@ -1,5 +1,6 @@
 """
 ui/server.py - Local HTTP/JSON server, static assets router, and preview streaming engine.
+Supports both 2-tuple JSON responses and 3-tuple binary image streams.
 """
 
 import http.server
@@ -45,9 +46,11 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
 
-    def _send_response(self, data: Any, status: int = 200):
+    def _send_response(self, data: Any, status: int = 200, extra_headers: Optional[dict] = None):
         self.send_response(status)
         self.send_header("Access-Control-Allow-Origin", "*")
+
+        headers_dict = dict(extra_headers or {})
 
         # Emit Location header on HTTP redirects (e.g. OAuth /api/auth/login)
         if status in (301, 302, 303, 307, 308):
@@ -59,19 +62,25 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             elif isinstance(data, dict):
                 redirect_url = data.get("location") or data.get("auth_url") or data.get("url")
             if redirect_url:
-                self.send_header("Location", redirect_url)
+                headers_dict["Location"] = redirect_url
 
-        if isinstance(data, str):
+        if isinstance(data, (bytes, bytearray)):
+            payload = bytes(data)
+            if "Content-Type" not in headers_dict:
+                headers_dict["Content-Type"] = "application/octet-stream"
+        elif isinstance(data, str):
             payload = data.encode("utf-8")
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-        elif isinstance(data, (bytes, bytearray)):
-            payload = data
-            self.send_header("Content-Type", "application/octet-stream")
+            if "Content-Type" not in headers_dict:
+                headers_dict["Content-Type"] = "text/html; charset=utf-8"
         else:
             payload = json.dumps(data).encode("utf-8")
-            self.send_header("Content-Type", "application/json")
+            if "Content-Type" not in headers_dict:
+                headers_dict["Content-Type"] = "application/json"
 
-        self.send_header("Content-Length", str(len(payload)))
+        headers_dict["Content-Length"] = str(len(payload))
+
+        for h_key, h_val in headers_dict.items():
+            self.send_header(h_key, h_val)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -123,6 +132,34 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, f"Error streaming preview file: {e}")
 
+    def _handle_api_route(self, method: str, path: str, body_data: dict, params: dict):
+        conn = get_db()
+        try:
+            route_res = dispatch_route(
+                method=method,
+                path=path,
+                conn=conn,
+                download_manager=download_manager,
+                body_data=body_data,
+                query_params=params,
+                task_manager=task_manager,
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            route_res = ({"error": f"Internal Server Error: {e}"}, 500)
+        finally:
+            conn.close()
+
+        if isinstance(route_res, tuple) and len(route_res) == 3:
+            data, status, extra_headers = route_res
+            self._send_response(data, status, extra_headers=extra_headers)
+        elif isinstance(route_res, tuple) and len(route_res) == 2:
+            data, status = route_res
+            self._send_response(data, status)
+        elif route_res is not None:
+            self._send_response(route_res, 200)
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -133,16 +170,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path.startswith("/api/"):
-            conn = get_db()
-            try:
-                data, status = dispatch_route("GET", path, conn, download_manager, {}, params, task_manager=task_manager)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                data, status = {"error": f"Internal Server Error: {e}"}, 500
-            finally:
-                conn.close()
-            self._send_response(data, status)
+            self._handle_api_route("GET", path, {}, params)
             return
 
         if path == "/":
@@ -164,16 +192,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 body_data = {}
 
         if path.startswith("/api/"):
-            conn = get_db()
-            try:
-                data, status = dispatch_route("POST", path, conn, download_manager, body_data, params, task_manager=task_manager)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                data, status = {"error": f"Internal Server Error: {e}"}, 500
-            finally:
-                conn.close()
-            self._send_response(data, status)
+            self._handle_api_route("POST", path, body_data, params)
             return
 
         self._send_response({"error": "Method not allowed for static paths"}, 405)
@@ -193,16 +212,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 body_data = {}
 
         if path.startswith("/api/"):
-            conn = get_db()
-            try:
-                data, status = dispatch_route("DELETE", path, conn, download_manager, body_data, params, task_manager=task_manager)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                data, status = {"error": f"Internal Server Error: {e}"}, 500
-            finally:
-                conn.close()
-            self._send_response(data, status)
+            self._handle_api_route("DELETE", path, body_data, params)
             return
 
         self._send_response({"error": "Method not allowed for static paths"}, 405)

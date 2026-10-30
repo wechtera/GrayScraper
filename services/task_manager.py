@@ -1,16 +1,20 @@
 """
-ui/services/task_manager.py - Persistent background pipeline task orchestrator.
+services/task_manager.py - Persistent background pipeline task orchestrator.
 
 Supports:
 - Playwright library scrapers (task_type = 'library_scrape')
 - Async REST metadata ingestion (task_type = 'metadata_ingest')
 - Vault integrity reconciliation (task_type = 'vault_reconcile')
 - Retroactive archive peeker backfill (task_type = 'archive_peek_backfill')
+- Background Slicer Stash materialization (task_type = 'stash_export')
+- In-place External Library Reconciliation (task_type = 'external_library_reconcile')
+Instrumented with dynamic topic-based subsystem logging ('http', 'storage', 'sql').
 """
 
 import asyncio
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -24,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from services.logger import log_layer, logger
 from .reconciler import VaultReconciler
 
 
@@ -149,7 +154,6 @@ def extract_normalized_records(model_id: int, data: dict, backup_path: Path):
                     item.get("created_at"),
                 ))
 
-    # Fallback: Adopt archive_download_url if no separate file items exist
     archive_dl_url = data.get("archive_download_url")
     if not file_rows and archive_dl_url:
         clean_title = sanitize_segment(data.get("name") or f"Model_{model_id}")
@@ -178,6 +182,8 @@ class TaskManager:
 
     def __init__(self, db_path: Path, root_dir: Optional[Path] = None):
         if getattr(self, "_initialized", False):
+            if db_path:
+                self.db_path = Path(db_path).resolve()
             return
 
         self.db_path = Path(db_path).resolve()
@@ -224,7 +230,8 @@ class TaskManager:
                         release_month TEXT,
                         is_bonus BOOLEAN DEFAULT 0,
                         vault_path TEXT,
-                        archive_download_url TEXT
+                        archive_download_url TEXT,
+                        source TEXT DEFAULT 'mmf'
                     );
 
                     CREATE TABLE IF NOT EXISTS model_tags (
@@ -278,6 +285,8 @@ class TaskManager:
                 m_cols = {r[1] for r in conn.execute("PRAGMA table_info(models);").fetchall()}
                 if "archive_download_url" not in m_cols:
                     conn.execute("ALTER TABLE models ADD COLUMN archive_download_url TEXT;")
+                if "source" not in m_cols:
+                    conn.execute("ALTER TABLE models ADD COLUMN source TEXT DEFAULT 'mmf';")
 
                 task_cols = {r[1] for r in conn.execute("PRAGMA table_info(pipeline_tasks);").fetchall()}
                 if "params_json" not in task_cols:
@@ -296,6 +305,7 @@ class TaskManager:
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_line = f"[{timestamp}] {message}"
         print(f"[Task #{task_id}] {log_line}")
+        logger.info(f"[Task #{task_id}] {message}")
         with self._get_db() as conn:
             with conn:
                 conn.execute("""
@@ -336,10 +346,6 @@ class TaskManager:
                         completed_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (status, status, label, summary_json, artifacts_json, artifacts_json, task_id))
-
-    # -------------------------------------------------------------------------
-    # Unified Task Accessors & Schedulers
-    # -------------------------------------------------------------------------
 
     def get_active_task(self) -> Optional[Dict[str, Any]]:
         with self._get_db() as conn:
@@ -407,7 +413,11 @@ class TaskManager:
                         "task_id": running["id"],
                     }
 
-                params_json = json.dumps(params or {})
+                task_params = dict(params or {})
+                if "db_path" not in task_params:
+                    task_params["db_path"] = str(self.db_path)
+
+                params_json = json.dumps(task_params)
                 cursor = conn.execute("""
                     INSERT INTO pipeline_tasks (task_type, status, progress_pct, progress_label, params_json, log_output)
                     VALUES (?, 'running', 0.0, 'Initializing background worker...', ?, '');
@@ -418,14 +428,22 @@ class TaskManager:
             self.active_task_id = task_id
             self._cancel_requested = False
 
+        log_layer("sql", logging.INFO, f"Dispatched background task #{task_id} (Type: {task_type})")
+
         if task_type == "vault_reconcile":
-            t = threading.Thread(target=self._run_reconcile_worker, args=(task_id, params or {}), daemon=True)
+            t = threading.Thread(target=self._run_reconcile_worker, args=(task_id, task_params), daemon=True)
             t.start()
         elif task_type == "archive_peek_backfill":
-            t = threading.Thread(target=self._run_archive_peek_worker, args=(task_id, params or {}), daemon=True)
+            t = threading.Thread(target=self._run_archive_peek_worker, args=(task_id, task_params), daemon=True)
             t.start()
         elif task_type == "library_scrape":
             t = threading.Thread(target=self._run_scrape_worker, args=(task_id,), daemon=True)
+            t.start()
+        elif task_type == "stash_export":
+            t = threading.Thread(target=self._run_stash_export_worker, args=(task_id, task_params), daemon=True)
+            t.start()
+        elif task_type == "external_library_reconcile":
+            t = threading.Thread(target=self._run_external_indexer_worker, args=(task_id, task_params), daemon=True)
             t.start()
         else:
             self._finalize_task(task_id, "failed", f"Unsupported task type: {task_type}", {})
@@ -451,6 +469,7 @@ class TaskManager:
                             completed_at = CURRENT_TIMESTAMP
                         WHERE id = ? AND status = 'running';
                     """, (task_id,))
+            logger.info(f"[TaskManager] Cancelled task #{task_id} by operator.")
             return {"success": True, "task_id": task_id}
 
     def kill_task(self, task_id: int) -> Dict[str, Any]:
@@ -473,6 +492,7 @@ class TaskManager:
                             completed_at = CURRENT_TIMESTAMP
                         WHERE id = ?;
                     """, (task_id,))
+            logger.warning(f"[TaskManager] Force killed task #{task_id} by operator.")
             return {"success": True, "task_id": task_id}
 
     def get_status(self) -> Dict[str, Any]:
@@ -622,6 +642,7 @@ class TaskManager:
             cookies_dest.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
             count_label = len(parsed) if isinstance(parsed, list) else "valid"
             self._append_log(task_id, f"Exported {count_label} session cookies to {target_dir.name}/cookies.json")
+            log_layer("http", logging.DEBUG, f"Scraper exported session cookies to {target_dir.name}/cookies.json")
         except Exception as e:
             self._append_log(task_id, f"Notice: Error exporting cookies: {e}. Writing fallback empty list.")
             cookies_dest.write_text("[]", encoding="utf-8")
@@ -663,6 +684,7 @@ class TaskManager:
                     count = int(match_cycle.group(2))
                     pct = min(90.0, 10.0 + (count / 5000.0) * 80.0)
                     self._update_progress(task_id, pct, f"Cycle {cycle}: {count} models intercepted...")
+                    log_layer("http", logging.DEBUG, f"Playwright scrape intercepted {count} model IDs in cycle {cycle}")
 
                 if "Target count reached" in line_str or "Captured all" in line_str:
                     self._update_progress(task_id, 95.0, "Finalizing outputs on disk...")
@@ -864,7 +886,7 @@ class TaskManager:
                         for c in raw
                         if isinstance(c, dict) and "name" in c and "value" in c
                     }
-                elif isinstance(raw, dict):
+                elif isinstance(parsed, dict):
                     cookies_dict = {str(k): str(v) for k, v in raw.items()}
             except Exception:
                 pass
@@ -874,8 +896,10 @@ class TaskManager:
         if auth_token:
             active_headers["Authorization"] = f"Bearer {auth_token}"
             self._append_log(task_id, "Using MMF API Bearer token from settings.")
+            log_layer("http", logging.INFO, f"Ingest task #{task_id}: Authenticated via OAuth Bearer token.")
         else:
             self._append_log(task_id, f"Using {len(cookies_dict)} session cookies for authentication.")
+            log_layer("http", logging.INFO, f"Ingest task #{task_id}: Operating via cookie authentication.")
 
         semaphore = asyncio.Semaphore(5)
         db_lock = asyncio.Lock()
@@ -909,6 +933,7 @@ class TaskManager:
                             cached = json.load(f)
                             if not cached.get("__tombstone__"):
                                 data = cached
+                                log_layer("storage", logging.DEBUG, f"Model #{model_id}: Loaded cached raw metadata.")
                     except Exception:
                         data = None
 
@@ -919,6 +944,7 @@ class TaskManager:
                             if self._cancel_requested:
                                 return
                             try:
+                                log_layer("http", logging.DEBUG, f"Requesting metadata: GET {url} (Attempt {attempt})")
                                 res = await client.get(url)
                                 if res.status_code == 200:
                                     data = res.json()
@@ -928,16 +954,19 @@ class TaskManager:
                                     break
                                 elif res.status_code == 401:
                                     self._append_log(task_id, "MMF Bearer token expired (401). Falling back to session cookies.")
+                                    log_layer("http", logging.WARNING, f"Model #{model_id}: 401 Bearer expired. Removing Authorization header.")
                                     if "Authorization" in client.headers:
                                         del client.headers["Authorization"]
                                     continue
                                 elif res.status_code == 429:
                                     wait_time = int(res.headers.get("Retry-After", 5))
                                     self._append_log(task_id, f"Rate limited on model {model_id}. Waiting {wait_time}s...")
+                                    log_layer("http", logging.WARNING, f"Model #{model_id}: 429 Rate limited. Sleeping {wait_time}s.")
                                     await asyncio.sleep(wait_time)
                                     continue
                                 elif res.status_code in (404, 410):
                                     self._append_log(task_id, f"Model {model_id} currently unavailable (HTTP {res.status_code}). Tombstone retained.")
+                                    log_layer("http", logging.INFO, f"Model #{model_id}: Returned HTTP {res.status_code} (Tombstone).")
                                     is_tombstone = True
                                     data = {
                                         "id": model_id,
@@ -950,10 +979,13 @@ class TaskManager:
                                     break
                                 elif res.status_code == 403:
                                     self._append_log(task_id, f"Model {model_id} access forbidden (HTTP 403).")
+                                    log_layer("http", logging.ERROR, f"Model #{model_id}: Access forbidden HTTP 403.")
                                     break
                                 else:
                                     self._append_log(task_id, f"Model {model_id} unexpected HTTP {res.status_code} on attempt {attempt}.")
-                            except Exception:
+                                    log_layer("http", logging.WARNING, f"Model #{model_id}: Unexpected HTTP {res.status_code}.")
+                            except Exception as ex:
+                                log_layer("http", logging.WARNING, f"Model #{model_id} network exception: {ex}")
                                 await asyncio.sleep(1.0 * attempt)
 
                 if not data:
@@ -962,6 +994,9 @@ class TaskManager:
                     return
 
                 anomalies = inspect_schema_drift(model_id, data) if not is_tombstone else []
+                if anomalies:
+                    log_layer("sql", logging.WARNING, f"Model #{model_id} schema anomalies detected: {anomalies}")
+
                 model_row, tag_rows, file_rows = extract_normalized_records(model_id, data, backup_file)
 
                 designer_name = model_row[6]
@@ -983,6 +1018,7 @@ class TaskManager:
                                 resp = client_img.get(primary_image_url)
                                 if resp.status_code == 200 and len(resp.content) > 0:
                                     cover_file.write_bytes(resp.content)
+                                    log_layer("http", logging.DEBUG, f"Model #{model_id}: Cached cover.jpg preview ({len(resp.content)} B)")
                         except Exception:
                             pass
 
@@ -1049,8 +1085,11 @@ class TaskManager:
                             if pre_supported:
                                 creator_breakdown[designer_name]["pre_supported"] += 1
 
+                        log_layer("sql", logging.DEBUG, f"Model #{model_id}: Persisted metadata to library.db ({len(file_rows)} files)")
+
                     except Exception as db_err:
                         self._append_log(task_id, f"Database write error on model {model_id}: {db_err}")
+                        log_layer("sql", logging.ERROR, f"Database write error on Model #{model_id}: {db_err}")
                         failed_count += 1
 
                 processed_count += 1
@@ -1245,6 +1284,124 @@ class TaskManager:
             tb = traceback.format_exc()
             self._append_log(task_id, f"Fatal archive peek backfill exception: {e}\n{tb}")
             self._finalize_task(task_id, "failed", f"Archive peek exception: {e}", {})
+        finally:
+            with self._lock:
+                self.active_task_id = None
+                self._cancel_requested = False
+
+    # -------------------------------------------------------------------------
+    # 5. Background Slicer Stash Export Worker
+    # -------------------------------------------------------------------------
+
+    def _run_stash_export_worker(self, task_id: int, params: Dict[str, Any]):
+        stash_id = int(params.get("stash_id", 0))
+        filter_mode = str(params.get("filter_mode", "all"))
+        db_path_str = params.get("db_path")
+        target_db = Path(db_path_str).resolve() if db_path_str else self.db_path
+        self._append_log(task_id, f"Slicer Stash Export worker started for Stash #{stash_id} (Filter: {filter_mode.upper()}).")
+
+        def log_cb(msg: str):
+            self._append_log(task_id, msg)
+
+        def progress_cb(pct: float, label: str):
+            self._update_progress(task_id, pct, label)
+
+        def cancel_cb() -> bool:
+            return self._cancel_requested
+
+        try:
+            from services.stash_exporter import StashExporter
+            exporter = StashExporter(db_path=target_db)
+            result = exporter.export_stash(
+                stash_id=stash_id,
+                filter_mode=filter_mode,
+                progress_cb=progress_cb,
+                log_cb=log_cb,
+                cancel_cb=cancel_cb,
+            )
+
+            if self._cancel_requested:
+                self._append_log(task_id, "Stash export cancelled by operator.")
+                self._finalize_task(task_id, "cancelled", "Stash export cancelled by operator", result, result)
+                return
+
+            label = f"Export ready: {result['total_files']} files staged to {result['folder_name']}"
+            self._append_log(task_id, label)
+            self._finalize_task(task_id, "completed", label, result, result)
+
+        except InterruptedError:
+            self._append_log(task_id, "Stash export cancelled by operator.")
+            self._finalize_task(task_id, "cancelled", "Stash export cancelled by operator", {})
+        except Exception as e:
+            tb = traceback.format_exc()
+            self._append_log(task_id, f"Fatal stash export exception: {e}\n{tb}")
+            self._finalize_task(task_id, "failed", f"Stash export error: {e}", {})
+        finally:
+            with self._lock:
+                self.active_task_id = None
+                self._cancel_requested = False
+
+    # -------------------------------------------------------------------------
+    # 6. In-Place External Library Reconciler Worker (Phase 8)
+    # -------------------------------------------------------------------------
+
+    def _run_external_indexer_worker(self, task_id: int, params: Dict[str, Any]):
+        library_id = params.get("library_id")
+        lib_name = params.get("library_name") or f"Library #{library_id}"
+        self._append_log(task_id, f"In-Place External Library Reconciler started for '{lib_name}' (ID: {library_id}).")
+
+        def log_cb(msg: str):
+            self._append_log(task_id, msg)
+
+        def progress_cb(pct: float, label: str):
+            self._update_progress(task_id, pct, label)
+
+        def cancel_cb() -> bool:
+            return self._cancel_requested
+
+        try:
+            from services.external_indexer import ExternalLibraryIndexer
+            indexer = ExternalLibraryIndexer(self.db_path)
+            result = indexer.scan_and_reconcile_library(
+                library_id=int(library_id),
+                progress_cb=progress_cb,
+                log_cb=log_cb,
+                cancel_cb=cancel_cb,
+            )
+
+            if self._cancel_requested:
+                self._append_log(task_id, "Library crawl cancelled by operator.")
+                self._finalize_task(
+                    task_id,
+                    "cancelled",
+                    "Library scan cancelled by operator",
+                    result,
+                    result,
+                )
+                return
+
+            if not result.get("success", False):
+                err = result.get("error", "Library indexing failed")
+                self._append_log(task_id, f"Library crawl failed: {err}")
+                self._finalize_task(
+                    task_id,
+                    "failed",
+                    err,
+                    result,
+                    result,
+                )
+                return
+
+            models_count = result.get("models_indexed", 0)
+            files_count = result.get("files_indexed", 0)
+            label = f"Scan complete: {models_count} models, {files_count} files indexed"
+            self._append_log(task_id, label)
+            self._finalize_task(task_id, "completed", label, result, result)
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            self._append_log(task_id, f"Fatal external indexer exception: {e}\n{tb}")
+            self._finalize_task(task_id, "failed", f"Indexer error: {e}", {})
         finally:
             with self._lock:
                 self.active_task_id = None

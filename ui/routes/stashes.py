@@ -1,7 +1,7 @@
 """
 ui/routes/stashes.py - REST API endpoints for the Stash system ("A pile of gray").
 Handles staging manifests, polymorphic item curation, active pointer persistence,
-duplicate prevention, and batch model additions.
+download validation guardrails, batch model additions, and background slicer materialization.
 """
 
 from pathlib import Path
@@ -21,13 +21,16 @@ try:
 except ImportError:
     from ui.services.stash_service import StashService
 
-# Module-level service instance
+try:
+    from services.stash_exporter import StashExporter
+except ImportError:
+    try:
+        from ui.services.stash_exporter import StashExporter
+    except ImportError:
+        from stash_exporter import StashExporter
+
 _stash_service = StashService()
 
-
-# -----------------------------------------------------------------------------
-# Route Handlers
-# -----------------------------------------------------------------------------
 
 def handle_get_stashes(
     conn: sqlite3.Connection,
@@ -85,7 +88,7 @@ def handle_set_active_stash(
     body: Optional[dict] = None,
     params: Optional[dict] = None,
 ) -> Tuple[Dict[str, Any], int]:
-    """POST /api/stashes/:id/active - Sets target stash as active, persisting immediately."""
+    """POST /api/stashes/:id/active - Sets target stash as active."""
     try:
         updated = _stash_service.set_active_stash(stash_id=stash_id, conn=conn)
         return {"success": True, "active_stash": updated}, 200
@@ -116,7 +119,7 @@ def handle_delete_stash(
     body: Optional[dict] = None,
     params: Optional[dict] = None,
 ) -> Tuple[Dict[str, Any], int]:
-    """DELETE /api/stashes/:id - Deletes stash manifest and items (original files on disk are untouched)."""
+    """DELETE /api/stashes/:id - Deletes stash manifest and items (original files untouched)."""
     deleted = _stash_service.delete_stash(stash_id=stash_id, conn=conn)
     if not deleted:
         return {"error": f"Stash #{stash_id} not found."}, 404
@@ -130,10 +133,6 @@ def handle_add_stash_item(
     body: Optional[dict] = None,
     params: Optional[dict] = None,
 ) -> Tuple[Dict[str, Any], int]:
-    """
-    POST /api/stashes/:id/items - Adds a polymorphic item (model, file, submodel, archive_member).
-    Returns HTTP 409 with friendly duplicate message if item already exists.
-    """
     payload = body or {}
     item_type = str(payload.get("item_type", "")).strip()
     model_id = payload.get("model_id")
@@ -207,7 +206,6 @@ def handle_bulk_add_models(
     body: Optional[dict] = None,
     params: Optional[dict] = None,
 ) -> Tuple[Dict[str, Any], int]:
-    """POST /api/stashes/:id/bulk-models - Batch adds multiple entire models ({model_ids: [...]})."""
     payload = body or {}
     model_ids = payload.get("model_ids")
     if not isinstance(model_ids, list):
@@ -222,14 +220,96 @@ def handle_bulk_add_models(
         result = _stash_service.bulk_add_models(stash_id=stash_id, model_ids=clean_ids, conn=conn)
         return result, 200
     except ValueError as e:
-        return {"error": str(e)}, 404
+        status_code = 404 if "does not exist" in str(e) else 400
+        return {"error": str(e)}, status_code
     except Exception as e:
         return {"error": str(e)}, 500
 
 
-# -----------------------------------------------------------------------------
-# Sub-Route Dispatcher
-# -----------------------------------------------------------------------------
+def handle_post_export_stash(
+    conn: sqlite3.Connection,
+    stash_id: int,
+    download_manager: Any = None,
+    body: Optional[dict] = None,
+    params: Optional[dict] = None,
+    task_manager: Any = None,
+) -> Tuple[Dict[str, Any], int]:
+    """
+    POST /api/stashes/:id/export - Dispatches stash materialization.
+    If task_manager is provided (live server), runs asynchronously (HTTP 202).
+    If task_manager is None (unit tests), runs synchronously (HTTP 200).
+    """
+    stash = conn.execute("SELECT id, name, description FROM stashes WHERE id = ?;", (stash_id,)).fetchone()
+    if not stash:
+        return {"error": f"Stash #{stash_id} not found."}, 404
+
+    stash_name = stash["name"]
+
+    items = conn.execute("SELECT * FROM stash_items WHERE stash_id = ?;", (stash_id,)).fetchall()
+    if not items:
+        return {"error": f"Stash '{stash_name}' (ID #{stash_id}) is empty. Add items before exporting."}, 400
+
+    for it in items:
+        itype = it["item_type"]
+        mid = it["model_id"]
+        fid = it["file_id"]
+        smid = it["submodel_id"]
+        amid = it["archive_member_id"]
+        try:
+            if itype == "model":
+                _stash_service._verify_model_downloaded(conn, mid)
+            elif itype == "file":
+                _stash_service._verify_file_downloaded(conn, fid)
+            elif itype == "submodel":
+                _stash_service._verify_submodel_downloaded(conn, smid, fid)
+            elif itype == "archive_member":
+                _stash_service._verify_archive_member_downloaded(conn, amid, fid)
+        except ValueError as ve:
+            return {"error": str(ve)}, 400
+
+    payload = body or {}
+    filter_mode = str(payload.get("filter", payload.get("filter_mode", "all"))).strip().lower()
+    if filter_mode not in ("all", "presupported", "unsupported"):
+        filter_mode = "all"
+
+    # Background pipeline execution via TaskManager when available (live web server)
+    if task_manager is not None and not bool(payload.get("sync", False)):
+        task_res = task_manager.start_task("stash_export", {
+            "stash_id": stash_id,
+            "stash_name": stash_name,
+            "filter_mode": filter_mode,
+            "db_path": str(_stash_service.db_path),
+        })
+        if not task_res.get("success"):
+            return {"error": task_res.get("error", "Failed starting export task.")}, 409
+
+        return {
+            "success": True,
+            "task_id": task_res["task_id"],
+            "stash_id": stash_id,
+            "stash_name": stash_name,
+            "message": f"Stash export task #{task_res['task_id']} started in background.",
+        }, 202
+
+    # Direct synchronous execution (unit test environments without task_manager)
+    try:
+        exporter = StashExporter(db_path=_stash_service.db_path)
+        result = exporter.export_stash(stash_id=stash_id, filter_mode=filter_mode, conn=conn)
+        return {
+            "success": True,
+            "export_path": result["export_path"],
+            "folder_name": result["folder_name"],
+            "total_files": result["total_files"],
+            "total_bytes": result["total_bytes"],
+            "manifest_path": result.get("manifest_path"),
+            "stash_id": stash_id,
+            "stash_name": result.get("stash_name", stash_name),
+        }, 200
+    except ValueError as ve:
+        return {"error": str(ve)}, 400
+    except Exception as e:
+        return {"error": f"Stash export failed: {str(e)}"}, 500
+
 
 def dispatch_stash_routes(
     method: str,
@@ -238,52 +318,49 @@ def dispatch_stash_routes(
     download_manager: Any = None,
     body: Optional[dict] = None,
     params: Optional[dict] = None,
+    task_manager: Any = None,
 ) -> Optional[Tuple[Dict[str, Any], int]]:
-    """
-    Sub-dispatcher matching all /api/stashes routes.
-    Returns (response_dict, status_code) or None if path does not match.
-    """
-    # 1. /api/stashes
+    """Sub-dispatcher matching all /api/stashes routes."""
     if path in ("/api/stashes", "/api/stashes/"):
         if method == "GET":
             return handle_get_stashes(conn, download_manager, body, params)
         if method == "POST":
             return handle_create_stash(conn, download_manager, body, params)
 
-    # 2. /api/stashes/active
     if path in ("/api/stashes/active", "/api/stashes/active/"):
         if method == "GET":
             return handle_get_active_stash(conn, download_manager, body, params)
 
-    # 3. /api/stashes/items/:item_id
     item_match = re.match(r"^/api/stashes/items/(\d+)/?$", path)
     if item_match:
         item_id = int(item_match.group(1))
         if method == "DELETE":
             return handle_remove_stash_item(conn, item_id, download_manager, body, params)
 
-    # 4. /api/stashes/:id/active
     active_match = re.match(r"^/api/stashes/(\d+)/active/?$", path)
     if active_match:
         stash_id = int(active_match.group(1))
         if method == "POST":
             return handle_set_active_stash(conn, stash_id, download_manager, body, params)
 
-    # 5. /api/stashes/:id/items
     items_match = re.match(r"^/api/stashes/(\d+)/items/?$", path)
     if items_match:
         stash_id = int(items_match.group(1))
         if method == "POST":
             return handle_add_stash_item(conn, stash_id, download_manager, body, params)
 
-    # 6. /api/stashes/:id/bulk-models
     bulk_match = re.match(r"^/api/stashes/(\d+)/bulk-models/?$", path)
     if bulk_match:
         stash_id = int(bulk_match.group(1))
         if method == "POST":
             return handle_bulk_add_models(conn, stash_id, download_manager, body, params)
 
-    # 7. /api/stashes/:id
+    export_match = re.match(r"^/api/stashes/(\d+)/export/?$", path)
+    if export_match:
+        stash_id = int(export_match.group(1))
+        if method == "POST":
+            return handle_post_export_stash(conn, stash_id, download_manager, body, params, task_manager=task_manager)
+
     detail_match = re.match(r"^/api/stashes/(\d+)/?$", path)
     if detail_match:
         stash_id = int(detail_match.group(1))

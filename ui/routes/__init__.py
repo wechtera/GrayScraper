@@ -7,9 +7,8 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
-# Ensure root repository directory is on sys.path
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
@@ -35,6 +34,8 @@ from .catalog import (
     handle_get_model_files,
     handle_get_models,
     handle_get_releases,
+    handle_post_model_render_view,
+    handle_post_render_stl,
 )
 from .downloads import (
     handle_delete_downloads_queue,
@@ -57,10 +58,18 @@ from .reconcile import (
     handle_post_reconcile_staging_purge,
 )
 from .settings import (
+    handle_delete_external_library,
     handle_get_directory_usage,
+    handle_get_external_libraries,
+    handle_get_logging_config,
     handle_get_settings,
     handle_get_system_browse,
+    handle_post_external_library,
+    handle_post_external_library_scan,
+    handle_post_logging_config,
+    handle_post_logs_purge,
     handle_post_settings,
+    handle_post_stashes_purge,
 )
 from .stashes import (
     dispatch_stash_routes,
@@ -71,6 +80,7 @@ from .stashes import (
     handle_get_active_stash,
     handle_get_stash_detail,
     handle_get_stashes,
+    handle_post_export_stash,
     handle_remove_stash_item,
     handle_set_active_stash,
 )
@@ -98,6 +108,13 @@ __all__ = [
     "handle_add_stash_item",
     "handle_remove_stash_item",
     "handle_bulk_add_models",
+    "handle_post_export_stash",
+    "handle_post_model_render_view",
+    "handle_post_render_stl",
+    "handle_get_external_libraries",
+    "handle_post_external_library",
+    "handle_delete_external_library",
+    "handle_post_external_library_scan",
 ]
 
 
@@ -109,7 +126,7 @@ def dispatch_route(
     body_data: Optional[dict] = None,
     query_params: Optional[dict] = None,
     task_manager: Any = None,
-) -> Tuple[Dict[str, Any], int]:
+) -> Union[Tuple[Dict[str, Any], int], Tuple[bytes, int, Dict[str, str]]]:
     """
     Main router invoked by ui/server.py.
     Matches HTTP method and path pattern to the appropriate route handler.
@@ -128,6 +145,7 @@ def dispatch_route(
             download_manager=download_manager,
             body=body,
             params=params,
+            task_manager=task_manager,
         )
         if stash_res is not None:
             return stash_res
@@ -140,6 +158,15 @@ def dispatch_route(
 
     if method == "GET" and path == "/api/models":
         return handle_get_models(conn, download_manager, body, params)
+
+    model_render_view_match = re.match(r"^/api/models/(\d+)/render-view/?$", path)
+    if method == "POST" and model_render_view_match:
+        model_id = int(model_render_view_match.group(1))
+        return handle_post_model_render_view(conn, model_id, download_manager, body, params, task_manager=task_manager)
+
+    if path in ("/api/render/stl", "/api/render/stl/"):
+        if method in ("POST", "GET"):
+            return handle_post_render_stl(conn, download_manager, body, params, task_manager=task_manager)
 
     model_detail_match = re.match(r"^/api/models/(\d+)$", path)
     if method == "GET" and model_detail_match:
@@ -210,8 +237,24 @@ def dispatch_route(
         return handle_post_downloads_control(conn, download_manager, body, params)
 
     # -------------------------------------------------------------------------
-    # 4. Settings & Storage Configuration Endpoints
+    # 4. Settings, In-Place External Libraries & Storage Configuration Endpoints
     # -------------------------------------------------------------------------
+    lib_scan_match = re.match(r"^/api/settings/libraries/(\d+)/scan/?$", path)
+    if method == "POST" and lib_scan_match:
+        lib_id = int(lib_scan_match.group(1))
+        return handle_post_external_library_scan(conn, lib_id, download_manager, body, params, task_manager=task_manager)
+
+    lib_del_match = re.match(r"^/api/settings/libraries/(\d+)/?$", path)
+    if method == "DELETE" and lib_del_match:
+        lib_id = int(lib_del_match.group(1))
+        return handle_delete_external_library(conn, lib_id, download_manager, body, params)
+
+    if path in ("/api/settings/libraries", "/api/settings/libraries/"):
+        if method == "GET":
+            return handle_get_external_libraries(conn, download_manager, body, params)
+        if method == "POST":
+            return handle_post_external_library(conn, download_manager, body, params)
+
     if method == "GET" and path == "/api/settings":
         return handle_get_settings(conn, download_manager, body, params)
 
@@ -229,6 +272,18 @@ def dispatch_route(
 
     if method == "POST" and path == "/api/storage/config":
         return handle_post_storage_config(conn, download_manager, body, params)
+
+    if method == "GET" and path == "/api/settings/logging":
+        return handle_get_logging_config(conn, download_manager, body, params)
+
+    if method == "POST" and path == "/api/settings/logging":
+        return handle_post_logging_config(conn, download_manager, body, params)
+
+    if method == "POST" and path == "/api/settings/logs/purge":
+        return handle_post_logs_purge(conn, download_manager, body, params)
+
+    if method == "POST" and path in ("/api/settings/stashes/purge", "/api/stashes/purge"):
+        return handle_post_stashes_purge(conn, download_manager, body, params)
 
     # -------------------------------------------------------------------------
     # 5. Native Authentication Endpoints

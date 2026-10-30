@@ -1,7 +1,15 @@
+"""
+services/analytics.py - Library continuity, release grouping, and catalog statistical metrics.
+Instrumented with dynamic topic-based subsystem logging ('sql').
+"""
+
 from datetime import datetime
+import logging
 import math
 import sqlite3
 from typing import Any, Optional
+
+from services.logger import log_layer, logger
 
 
 def calculate_month_sequence(start_month: str, end_month: str) -> list[str]:
@@ -25,8 +33,8 @@ def run_startup_analytics(conn: sqlite3.Connection):
     Augments the models table with release months and bonus designations,
     then recalculates release pack groupings and probable Patreon/Tribe bundles.
     """
+    log_layer("sql", logging.INFO, "Starting catalog continuity calculation and monthly release clustering...")
     with conn:
-        # Guard table structures if initializing in an empty or fresh database
         conn.execute("""
             CREATE TABLE IF NOT EXISTS model_tags (
                 model_id INTEGER NOT NULL,
@@ -149,6 +157,8 @@ def run_startup_analytics(conn: sqlite3.Connection):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, release_rows)
 
+    log_layer("sql", logging.INFO, f"Catalog analytics populated {len(release_rows)} distinct monthly release packs.")
+
 
 def compute_catalog_audit(conn: sqlite3.Connection, designer: Optional[str] = None) -> dict[str, Any]:
     """
@@ -156,6 +166,7 @@ def compute_catalog_audit(conn: sqlite3.Connection, designer: Optional[str] = No
     expected calendar months, gaps, volume averages, and statistical outliers.
     """
     current_month = datetime.now().strftime("%Y-%m")
+    log_layer("sql", logging.DEBUG, f"Computing continuity audit for: {designer or 'Entire Library'}")
 
     if designer:
         rows = conn.execute("""
@@ -208,6 +219,8 @@ def compute_catalog_audit(conn: sqlite3.Connection, designer: Optional[str] = No
             high_outliers.append({"month": m, "count": cnt, "diff": round(cnt - avg_count, 1)})
         elif (cnt < avg_count - sensitivity) or (cnt <= (avg_count * 0.5) and (avg_count - cnt) >= 3.0):
             low_outliers.append({"month": m, "count": cnt, "diff": round(avg_count - cnt, 1)})
+
+    log_layer("sql", logging.DEBUG, f"Continuity audit complete: {len(present_months)}/{len(expected_all)} months present ({len(missing)} missing).")
 
     return {
         "designer": designer or "Entire Library",

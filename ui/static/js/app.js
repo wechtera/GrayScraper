@@ -195,12 +195,21 @@ export function refreshCurrentView() {
     if (isVisible('sub-dl-reconcile')) loadReconcileView();
   }
   if (isVisible('view-stashes')) loadStashesView();
-  if (isVisible('view-settings')) loadSettingsView();
-  if (isVisible('view-tasks')) renderTasksView();
+  if (isVisible('view-settings')) {
+    loadSettingsView();
+    renderTasksView();
+  }
 }
 
 export function switchTab(tabName) {
-  const allViews = ['releases', 'models', 'creators', 'downloads', 'stashes', 'settings', 'tasks', 'help'];
+  // If user requests legacy #tasks, redirect to settings and scroll to tasks
+  let shouldScrollToTasks = false;
+  if (tabName === 'tasks') {
+    tabName = 'settings';
+    shouldScrollToTasks = true;
+  }
+
+  const allViews = ['releases', 'models', 'creators', 'downloads', 'stashes', 'settings', 'help'];
   allViews.forEach(v => {
     const el = document.getElementById('view-' + v);
     if (el) el.style.display = (v === tabName) ? 'block' : 'none';
@@ -211,8 +220,12 @@ export function switchTab(tabName) {
   if (activeBtn) activeBtn.classList.add('active');
 
   const libraryBtn = document.getElementById('btn-library-dropdown');
-  if (['releases', 'models', 'creators'].includes(tabName) && libraryBtn) {
-    libraryBtn.classList.add('active');
+  if (libraryBtn) {
+    if (['releases', 'models', 'creators'].includes(tabName)) {
+      libraryBtn.classList.add('active');
+    } else {
+      libraryBtn.classList.remove('active');
+    }
   }
 
   const isVisible = id => {
@@ -249,9 +262,15 @@ export function switchTab(tabName) {
   } else if (tabName === 'settings') {
     stopActiveTransfersPolling();
     loadSettingsView();
-  } else if (tabName === 'tasks') {
-    stopActiveTransfersPolling();
     renderTasksView();
+    if (shouldScrollToTasks) {
+      setTimeout(() => {
+        const tasksSection = document.getElementById('settings-pipeline-tasks') || document.getElementById('active-task-container');
+        if (tasksSection) {
+          tasksSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 60);
+    }
   } else {
     stopActiveTransfersPolling();
   }
@@ -357,6 +376,7 @@ export function resetToHome(event) {
   const resetChk = id => { const el = document.getElementById(id); if (el) el.checked = false; };
 
   resetVal('release-search');
+  resetVal('release-creator-filter');
   resetVal('model-search');
   resetVal('pending-search');
   resetVal('model-creator-filter');
@@ -591,7 +611,8 @@ function initApp() {
         'browse-modal',
         'modal-scraper',
         'modal-ingest',
-        'model-detail-modal'
+        'model-detail-modal',
+        'modal-archive-viewer'
       ].forEach(closeModal);
     }
   });
@@ -619,7 +640,7 @@ function initApp() {
   bindInput('pending-search', () => resetPendingPageAndLoad());
 
   window.addEventListener('hashchange', () => {
-    const tab = window.location.hash.replace('#', '') || 'releases';
+    const tab = window.location.hash.replace('#', '') || 'models';
     switchTab(tab);
   });
 

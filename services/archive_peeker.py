@@ -1,9 +1,11 @@
 """
 services/archive_peeker.py - Bidirectional anchor inspection, submodel discovery, and thumbnail correlation engine.
+Instrumented with dynamic topic-based subsystem logging ('archive', 'http', 'sql').
 """
 
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -22,6 +24,8 @@ ROOT_DIR = BASE_DIR.parent
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+from services.logger import log_layer, logger
 
 # Formats recognized as 3D printable models or slicer projects
 MODEL_EXTENSIONS = {".stl", ".obj", ".lys", ".ctb", ".ags", ".3mf", ".chitubox", ".prusa"}
@@ -148,17 +152,19 @@ class ArchivePeeker:
         """Entry point: inspects an archive, performs bidirectional segmentation, and records submodels."""
         archive_path = Path(archive_path).resolve()
         if not archive_path.exists():
+            log_layer("archive", logging.ERROR, f"Archive missing: {archive_path}")
             return {"success": False, "error": f"Archive file missing: {archive_path}"}
 
         try:
             if archive_path.stat().st_size == 0:
+                log_layer("archive", logging.WARNING, f"Archive is 0 bytes: {archive_path.name}")
                 return {"success": False, "error": "Archive file is 0 bytes (empty)"}
         except Exception as e:
             return {"success": False, "error": f"Cannot read archive stats: {e}"}
 
         ext = archive_path.suffix.lower()
+        log_layer("archive", logging.DEBUG, f"Peeking into archive: {archive_path.name} (Format: {ext})")
 
-        # Wrap reading in try/except to catch corrupt files (BadZipFile, etc.)
         try:
             if ext == ".zip":
                 member_list = self._inspect_zip(archive_path)
@@ -167,14 +173,17 @@ class ArchivePeeker:
                 member_list = self._inspect_rar(archive_path)
                 archive_type = "rar"
             else:
+                log_layer("archive", logging.WARNING, f"Unsupported archive format: {ext}")
                 return {"success": False, "error": f"Unsupported archive format: {ext}"}
         except Exception as e:
+            log_layer("archive", logging.ERROR, f"Archive read exception on {archive_path.name}: {e}")
             return {"success": False, "error": f"Corrupt or unreadable archive: {e}"}
 
         if not member_list:
+            log_layer("archive", logging.WARNING, f"No entries inside {archive_path.name}")
             return {"success": False, "error": "Archive contains zero readable entries"}
 
-        # 1. Filter out OS junk (macOS resource forks, thumbs)
+        # 1. Filter out OS junk
         clean_members = [
             m for m in member_list
             if not m.filename.startswith("._")
@@ -187,7 +196,6 @@ class ArchivePeeker:
         dest_dir = self.previews_root / str(model_id) / str(file_id)
         extracted_images = self._extract_images(archive_path, image_paths, dest_dir, archive_type)
 
-        # Fallback to catalog image if archive contains zero internal renders
         if not extracted_images:
             catalog_img = self._fetch_catalog_fallback_image(model_id, dest_dir)
             if catalog_img:
@@ -196,8 +204,8 @@ class ArchivePeeker:
         # 3. Separate 3D print members
         printable_members = [m for m in clean_members if m.file_extension in MODEL_EXTENSIONS]
 
-        # Digital/VTT/PDF document pack handling
         if not printable_members:
+            log_layer("archive", logging.INFO, f"Model #{model_id} File #{file_id} classified as document/visual pack.")
             submodels = self._handle_document_pack(clean_members, extracted_images, model_id, file_id)
             self._commit_to_database(file_id, model_id, submodels, clean_members)
             return {
@@ -208,7 +216,7 @@ class ArchivePeeker:
                 "images_extracted": len(extracted_images)
             }
 
-        # 4. Bidirectional segmentation (Image-Driven vs Structure-Driven)
+        # 4. Bidirectional segmentation
         submodels = self._segment_submodels(printable_members, extracted_images, model_id, file_id)
 
         # 5. Multi-tier thumbnail correlation
@@ -216,6 +224,8 @@ class ArchivePeeker:
 
         # 6. Persist to SQLite
         self._commit_to_database(file_id, model_id, submodels, clean_members)
+
+        log_layer("archive", logging.INFO, f"Model #{model_id} ({archive_path.name}): Discovered {len(submodels)} submodels, {len(extracted_images)} renders.")
 
         return {
             "success": True,
@@ -318,7 +328,6 @@ class ArchivePeeker:
         dest_dir: Path,
         archive_type: str
     ) -> Dict[str, Path]:
-        """Extracts 100% of archive render images into local preview storage."""
         dest_dir.mkdir(parents=True, exist_ok=True)
         extracted: Dict[str, Path] = {}
 
@@ -330,6 +339,8 @@ class ArchivePeeker:
             if not p.startswith("._") and not "__macosx" in p.lower()
         ]
 
+        log_layer("archive", logging.DEBUG, f"Extracting {len(filtered_targets)} preview images from {archive_path.name}")
+
         if archive_type == "zip":
             with zipfile.ZipFile(archive_path, "r") as zf:
                 for img_path in filtered_targets:
@@ -339,8 +350,8 @@ class ArchivePeeker:
                         with zf.open(img_path, "r") as src, open(out_file, "wb") as dst:
                             shutil.copyfileobj(src, dst)
                         extracted[img_path] = out_file
-                    except Exception:
-                        pass
+                    except Exception as ze:
+                        log_layer("archive", logging.WARNING, f"Image extract error on {img_path}: {ze}")
         elif self._bin_7z and Path(self._bin_7z).exists():
             for img_path in filtered_targets:
                 try:
@@ -353,8 +364,8 @@ class ArchivePeeker:
                         if target_file != final_file:
                             shutil.move(str(target_file), str(final_file))
                         extracted[img_path] = final_file
-                except Exception:
-                    pass
+                except Exception as e7:
+                    log_layer("archive", logging.WARNING, f"7z image extract error on {img_path}: {e7}")
         elif self._bin_unrar and Path(self._bin_unrar).exists():
             for img_path in filtered_targets:
                 try:
@@ -367,13 +378,12 @@ class ArchivePeeker:
                         if target_file != final_file:
                             shutil.move(str(target_file), str(final_file))
                         extracted[img_path] = final_file
-                except Exception:
-                    pass
+                except Exception as ure:
+                    log_layer("archive", logging.WARNING, f"unrar image extract error on {img_path}: {ure}")
 
         return extracted
 
     def _fetch_catalog_fallback_image(self, model_id: int, dest_dir: Path) -> Optional[Path]:
-        """Pulls primary_image_url using httpx with browser headers when archive lacks internal renders."""
         url = None
         with self._get_db() as conn:
             row = conn.execute("SELECT primary_image_url FROM models WHERE id = ?;", (model_id,)).fetchone()
@@ -413,13 +423,14 @@ class ArchivePeeker:
         }
 
         try:
+            log_layer("http", logging.DEBUG, f"ArchivePeeker downloading fallback catalog preview: {url}")
             with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
                 resp = client.get(url)
                 if resp.status_code == 200 and len(resp.content) > 0:
                     out_file.write_bytes(resp.content)
                     return out_file
         except Exception as e:
-            print(f"[ArchivePeeker] Warning: Failed to fetch fallback preview for model {model_id}: {e}")
+            log_layer("http", logging.WARNING, f"ArchivePeeker fallback preview failed for Model #{model_id}: {e}")
 
         return None
 
@@ -430,7 +441,6 @@ class ArchivePeeker:
         model_id: int,
         file_id: int
     ) -> List[DiscoveredSubmodel]:
-        """Creates a single visual/document asset submodel for PDF/VTT packs."""
         total_sz = sum(m.size_bytes for m in members)
         sm = DiscoveredSubmodel(
             name="Documentation & Visual Assets",
@@ -443,10 +453,6 @@ class ArchivePeeker:
             best_img = next(iter(extracted_images.values()))
             sm.preview_image_path = f"{self.previews_root.name}/{model_id}/{file_id}/{best_img.name}"
         return [sm]
-
-    # -------------------------------------------------------------------------
-    # Bidirectional Submodel Segmentation
-    # -------------------------------------------------------------------------
 
     def _segment_submodels(
         self,
@@ -461,13 +467,14 @@ class ArchivePeeker:
         ]
 
         if len(discrete_renders) >= 4 and self._is_comet_lord_style(printable_members, discrete_renders):
+            log_layer("archive", logging.DEBUG, f"Model #{model_id}: Using image-driven segmentation (Comet Lord layout).")
             return self._segment_image_driven(printable_members, discrete_renders, extracted_images, model_id, file_id)
 
+        log_layer("archive", logging.DEBUG, f"Model #{model_id}: Using structure-driven directory segmentation.")
         return self._segment_structure_driven(printable_members, extracted_images, model_id, file_id)
 
     @staticmethod
     def _is_comet_lord_style(members: List[ArchiveMemberInfo], discrete_renders: List[Tuple[str, Path]]) -> bool:
-        """Detects modular multipart kits where loadouts match discrete renders."""
         render_stems = [dp.stem.lower() for _, dp in discrete_renders]
         has_poses = any("p1" in s or "p2" in s for s in render_stems)
         has_weapons = any(any(w in s for w in ["khopesh", "poleaxe", "sickle", "spear", "sword", "bow"]) for s in render_stems)
@@ -558,16 +565,13 @@ class ArchivePeeker:
         return list(submodels_map.values())
 
     def _derive_submodel_identity(self, member: ArchiveMemberInfo) -> Tuple[str, str, str]:
-        """Peele format wrappers, unifies scales, and decomposes unit troopers / attendants."""
         raw_parts = [p for p in Path(member.internal_path).parts if p]
         filename = member.filename
         fn_stem = Path(filename).stem
 
-        # Strip studio release root wrapper
         if len(raw_parts) > 1 and re.match(r"^(\d+\s+)?[A-Za-z0-9_\-\s,\.]+$", raw_parts[0]) and len(raw_parts) >= 3:
             raw_parts = raw_parts[1:]
 
-        # Peel format folders (STLs, Presupported, LYCHEE, etc.)
         cleaned_parts = []
         for p in raw_parts[:-1]:
             p_clean = p.strip()
@@ -578,7 +582,6 @@ class ArchivePeeker:
 
         rel_dir = "/".join(cleaned_parts) if cleaned_parts else "[Root Directory]"
 
-        # 1. Autonomous companions & mounts
         if "saddleless beast" in member.internal_path.lower() or "(no_saddle)" in filename.lower():
             parent = cleaned_parts[0] if cleaned_parts else "Mount"
             return f"{parent}_Saddleless", f"{parent} (Saddleless Beast)", rel_dir
@@ -588,17 +591,14 @@ class ArchivePeeker:
             att_name = attendant_id.group(0).replace("_", " ").title() if attendant_id else "Jurakin Attendant"
             return f"Jurakin_{att_name}", att_name, rel_dir
 
-        # 2. Multi-model units: Split individual troopers (Ghul A, Ghul B, Unit A...)
         unit_trooper_match = re.search(r"(?:^|_)((?:Ghul|Banshee|Ant|Beetle|Louse|Mosquito|Knight|Flea|Effigies|Gourdsouls?|Bitlings?|Smilers?|Weblings?)_?[A-F0-9])\b", fn_stem, re.IGNORECASE)
         if unit_trooper_match:
             trooper_token = unit_trooper_match.group(1).replace("_", " ").title()
             return f"Unit_{trooper_token}", trooper_token, rel_dir
 
-        # 3. Bases folder isolation
         if "bases" in rel_dir.lower() or (filename.lower().startswith("base") and not cleaned_parts):
             return "Bases_Collection", "Bases & Scenics", rel_dir
 
-        # 4. Standard parent directory clustering
         primary_folder = cleaned_parts[-1] if cleaned_parts else Path(filename).stem
         clean_name = re.sub(r"^[0-9]+[_\-\s]+", "", primary_folder).replace("_", " ").strip()
         return f"Dir_{primary_folder}", clean_name or "Standard Model", rel_dir
@@ -618,10 +618,6 @@ class ArchivePeeker:
 
         if m.file_extension in (".lys", ".ctb", ".chitubox", ".prusa", ".ags", ".agsplate"):
             sm.has_slicer_project = True
-
-    # -------------------------------------------------------------------------
-    # Multi-Tier Cascading Render Correlation
-    # -------------------------------------------------------------------------
 
     def _correlate_thumbnails(
         self,
@@ -727,9 +723,6 @@ class ArchivePeeker:
             elif best_match and best_match.exists():
                 sm.preview_image_path = f"{preview_folder_name}/{model_id}/{file_id}/{best_match.name}"
 
-    # -------------------------------------------------------------------------
-    # Database Persistence
-    # -------------------------------------------------------------------------
     def _commit_to_database(
         self,
         file_id: int,
@@ -749,7 +742,6 @@ class ArchivePeeker:
                     conn.execute("DELETE FROM file_archive_submodels WHERE file_id = ?;", (file_id,))
                 conn.execute("DELETE FROM file_archive_members WHERE file_id = ?;", (file_id,))
 
-                # 1. Insert submodel entities
                 member_submodel_map: Dict[str, int] = {}
                 for sm in submodels:
                     cur = conn.execute("""
@@ -767,7 +759,6 @@ class ArchivePeeker:
                     for m in sm.members:
                         member_submodel_map[m.internal_path] = submodel_id
 
-                # 2. Insert 100% of archive files into file_archive_members
                 all_rows = [
                     (
                         member_submodel_map.get(m.internal_path),
@@ -785,3 +776,4 @@ class ArchivePeeker:
                         submodel_id, file_id, internal_path, filename, size_bytes, is_supported, file_extension
                     ) VALUES (?, ?, ?, ?, ?, ?, ?);
                 """, all_rows)
+        log_layer("sql", logging.DEBUG, f"Persisted {len(submodels)} submodels and {len(all_clean_members)} archive members for File #{file_id}")

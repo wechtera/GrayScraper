@@ -1,8 +1,16 @@
+"""
+services/auth_service.py - MyMiniFactory Native OAuth 2.0 account profile and token lifecycle.
+Instrumented with dynamic topic-based subsystem logging ('http').
+"""
+
+import logging
 import sqlite3
 import time
 from typing import Any, Optional, Tuple
 
 import httpx
+
+from services.logger import log_layer
 
 MMF_USER_API_URL = "https://www.myminifactory.com/api/v2/user"
 
@@ -37,10 +45,13 @@ def get_auth_status(conn: sqlite3.Connection) -> dict[str, Any]:
 
     now = int(time.time())
     is_expired = now >= expires_at if expires_at > 0 else True
+    connected = bool(access_token and not is_expired)
+
+    log_layer("http", logging.DEBUG, f"OAuth status check: connected={connected}, is_expired={is_expired}, user='{username}'")
 
     return {
         "configured": bool(client_id),
-        "connected": bool(access_token and not is_expired),
+        "connected": connected,
         "username": username,
         "user_id": user_id,
         "expires_at": expires_at,
@@ -54,17 +65,24 @@ def fetch_user_profile(access_token: str) -> Tuple[str, str]:
     """Queries MMF v2 API with the bearer token to obtain username and user ID."""
     username = ""
     user_id = ""
+    log_layer("http", logging.DEBUG, f"Querying MMF User Profile: GET {MMF_USER_API_URL}")
     try:
         with httpx.Client(timeout=15.0) as client:
             resp = client.get(
                 MMF_USER_API_URL,
                 headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
             )
+            log_layer("http", logging.DEBUG, f"MMF User Profile response: HTTP {resp.status_code}")
             if resp.status_code == 200:
                 data = resp.json()
                 username = data.get("username") or data.get("name") or ""
                 user_id = str(data.get("id") or "")
+                log_layer("http", logging.INFO, f"OAuth connected to MyMiniFactory user: '{username}' (User ID: {user_id})")
+            elif resp.status_code == 401:
+                log_layer("http", logging.WARNING, "MMF User Profile query returned HTTP 401: Invalid or expired Bearer token.")
+            else:
+                log_layer("http", logging.WARNING, f"MMF User Profile returned HTTP {resp.status_code}")
     except Exception as e:
-        print(f"[OAuth Profile Error] {e}", flush=True)
+        log_layer("http", logging.ERROR, f"OAuth Profile network error: {e}")
 
     return username, user_id

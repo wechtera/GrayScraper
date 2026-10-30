@@ -1,7 +1,7 @@
 /**
  * ui/static/js/views/stashes.js - Stash System ("A pile of gray") view controller.
  * Handles sidebar listing, active stash toggling, pre-flight capacity audits,
- * inline creation, and item manifest management.
+ * inline creation, item manifest management, and background slicer print queue exporting.
  */
 
 import {
@@ -11,16 +11,14 @@ import {
   createStash,
   setActiveStash,
   deleteStash,
-  removeStashItem
+  removeStashItem,
+  exportStash
 } from '../api.js';
 import { formatBytes, escapeHtml } from '../utils.js';
 
 let currentSelectedStashId = null;
 let currentStashesList = [];
 
-/**
- * Updates the persistent top-nav stash button in the application header.
- */
 export function updateHeaderStashWidget(activeStash) {
   const widget = document.getElementById('header-stash-widget');
   const nameEl = document.getElementById('header-stash-name');
@@ -40,12 +38,8 @@ export function updateHeaderStashWidget(activeStash) {
   }
 }
 
-/**
- * Main entry point called when navigating to the Stashes tab.
- */
 export async function loadStashesView() {
   const sidebarContainer = document.getElementById('stashes-sidebar-list');
-  const workspaceContainer = document.getElementById('stash-detail-workspace');
   if (sidebarContainer) {
     sidebarContainer.innerHTML = '<div class="table-msg">Loading stashes...</div>';
   }
@@ -61,7 +55,6 @@ export async function loadStashesView() {
 
     updateHeaderStashWidget(activeStash);
 
-    // If currently selected stash is invalid, default to active stash or first stash
     if (!currentSelectedStashId || !currentStashesList.some(s => s.id === currentSelectedStashId)) {
       if (activeStash && activeStash.id) {
         currentSelectedStashId = activeStash.id;
@@ -87,9 +80,6 @@ export async function loadStashesView() {
   }
 }
 
-/**
- * Renders the left sidebar list of available stash manifests.
- */
 function renderStashesSidebar() {
   const container = document.getElementById('stashes-sidebar-list');
   if (!container) return;
@@ -128,18 +118,12 @@ function renderStashesSidebar() {
   }).join('');
 }
 
-/**
- * Selects a stash from the sidebar and mounts it into the right workspace.
- */
 export async function selectStash(stashId) {
   currentSelectedStashId = stashId;
   renderStashesSidebar();
   await loadStashDetail(stashId);
 }
 
-/**
- * Fetches detail and renders the right workspace for a specific stash.
- */
 export async function loadStashDetail(stashId) {
   const container = document.getElementById('stash-detail-workspace');
   if (!container) return;
@@ -170,6 +154,12 @@ export async function loadStashDetail(stashId) {
           <div class="text-dim font-xs mt-1">${escapeHtml(stash.description || 'A pile of gray')}</div>
         </div>
         <div class="stash-header-actions">
+          <button type="button" 
+                  class="btn-pill btn-action-primary" 
+                  id="btn-export-stash" 
+                  onclick="window.handleExportStash(${stash.id})">
+            Prepare for Slicer
+          </button>
           ${activeToggleBtn}
           <button type="button" class="btn-pill btn-action-cancel" onclick="window.handleDeleteStash(${stash.id}, '${escapeHtml(stash.name)}')">
             Delete Stash
@@ -223,8 +213,235 @@ export async function loadStashDetail(stashId) {
 }
 
 /**
- * Renders an individual card within the stash items grid.
+ * Triggers the background slicer export pipeline and monitors task progress.
  */
+export async function handleExportStash(stashId) {
+  const exportBtn = document.getElementById('btn-export-stash');
+  if (exportBtn) {
+    exportBtn.disabled = true;
+    exportBtn.innerHTML = `
+      <span class="spinner-inline" style="display:inline-block; width:12px; height:12px; border:2px solid #fff; border-top-color:transparent; border-radius:50%; animation:spin 0.6s linear infinite; vertical-align:middle; margin-right:6px;"></span>
+      Dispatching Background Task...
+    `;
+  }
+
+  try {
+    const res = await exportStash(stashId, { filter: 'all' });
+    if (res.task_id) {
+      showExportProgressModal(res.task_id, res.stash_name);
+      pollExportTaskProgress(res.task_id);
+    } else if (res.export_path) {
+      showExportSuccessModal(res);
+    }
+  } catch (err) {
+    console.error('Stash export error:', err);
+    alert(`Failed to start slicer export:\n\n${err.message}`);
+  } finally {
+    if (exportBtn) {
+      exportBtn.disabled = false;
+      exportBtn.innerHTML = 'Prepare for Slicer';
+    }
+  }
+}
+
+function showExportProgressModal(taskId, stashName) {
+  const existing = document.getElementById('stash-export-progress-modal');
+  if (existing) existing.remove();
+
+  const modalHtml = `
+    <div id="stash-export-progress-modal" class="modal-backdrop" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.75); display:flex; align-items:center; justify-content:center; z-index:9999;">
+      <div class="modal-card" style="background:var(--bg-card, #1e1e24); border:1px solid var(--border-color, #333); border-radius:8px; max-width:540px; width:90%; padding:24px; box-shadow:0 12px 32px rgba(0,0,0,0.5);">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-main font-bold font-lg" style="margin:0;">Extracting to Local Print Queue</h3>
+          <span class="status-badge status-pending font-xs">TASK #${taskId}</span>
+        </div>
+        <p class="text-dim font-sm mb-3">
+          Surgically extracting curated items for <strong>${escapeHtml(stashName || 'Stash')}</strong> to local scratch space...
+        </p>
+
+        <!-- Progress bar container -->
+        <div style="background:var(--bg-main, #141418); border-radius:4px; height:12px; overflow:hidden; margin-bottom:8px; border:1px solid var(--border-color, #2b2b36);">
+          <div id="export-task-progress-bar" style="background:var(--accent, #6366f1); height:100%; width:5%; transition:width 0.3s ease;"></div>
+        </div>
+
+        <div class="flex justify-between font-mono font-xs text-dim mb-3">
+          <span id="export-task-status-label">Initializing background worker...</span>
+          <span id="export-task-pct">5%</span>
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <button type="button" class="btn-pill btn-action-cancel" onclick="window.cancelExportTask(${taskId})">
+            Cancel Export
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+async function pollExportTaskProgress(taskId) {
+  const modal = document.getElementById('stash-export-progress-modal');
+  if (!modal) return;
+
+  try {
+    const res = await fetch('/api/tasks/status');
+    const data = await res.json();
+    const active = data.active_task;
+    const recent = data.recent_tasks || [];
+
+    let targetTask = null;
+    if (active && active.id === taskId) {
+      targetTask = active;
+    } else {
+      targetTask = recent.find(t => t.id === taskId);
+    }
+
+    if (!targetTask) {
+      setTimeout(() => pollExportTaskProgress(taskId), 1000);
+      return;
+    }
+
+    const bar = document.getElementById('export-task-progress-bar');
+    const label = document.getElementById('export-task-status-label');
+    const pct = document.getElementById('export-task-pct');
+
+    if (bar && pct && label) {
+      const p = Math.max(5, targetTask.progress_pct || 0);
+      bar.style.width = `${p}%`;
+      pct.textContent = `${Math.round(p)}%`;
+      if (targetTask.progress_label) {
+        label.textContent = targetTask.progress_label;
+      }
+    }
+
+    if (targetTask.status === 'completed') {
+      closeExportProgressModal();
+      const exportSummary = targetTask.result_summary || targetTask.artifacts || {};
+      showExportSuccessModal(exportSummary);
+      return;
+    }
+
+    if (targetTask.status === 'failed') {
+      closeExportProgressModal();
+      alert(`Stash export task failed:\n\n${targetTask.error_message || targetTask.progress_label || 'Extraction error'}`);
+      return;
+    }
+
+    if (targetTask.status === 'cancelled') {
+      closeExportProgressModal();
+      alert('Stash export was cancelled.');
+      return;
+    }
+
+    setTimeout(() => pollExportTaskProgress(taskId), 800);
+  } catch (err) {
+    console.warn('Error polling export task:', err);
+    setTimeout(() => pollExportTaskProgress(taskId), 1500);
+  }
+}
+
+export function closeExportProgressModal() {
+  const modal = document.getElementById('stash-export-progress-modal');
+  if (modal) modal.remove();
+}
+
+export async function cancelExportTask(taskId) {
+  try {
+    await fetch('/api/tasks/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId })
+    });
+    closeExportProgressModal();
+  } catch (err) {
+    alert(`Failed to cancel task: ${err.message}`);
+  }
+}
+
+function showExportSuccessModal(exportData) {
+  const existingModal = document.getElementById('stash-export-success-modal');
+  if (existingModal) existingModal.remove();
+
+  const exportPath = exportData.export_path || '';
+  const totalFiles = exportData.total_files || 0;
+  const totalBytes = exportData.total_bytes || 0;
+
+  const modalHtml = `
+    <div id="stash-export-success-modal" class="modal-backdrop" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.75); display:flex; align-items:center; justify-content:center; z-index:9999;">
+      <div class="modal-card" style="background:var(--bg-card, #1e1e24); border:1px solid var(--border-color, #333); border-radius:8px; max-width:640px; width:90%; padding:24px; box-shadow:0 12px 32px rgba(0,0,0,0.5);">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-main font-bold font-lg" style="margin:0; display:flex; align-items:center; gap:8px;">
+            <span style="color:#10b981;">&#10004;</span> Slicer Print Queue Ready
+          </h3>
+          <button type="button" class="btn-icon" onclick="window.closeExportSuccessModal()" style="background:transparent; border:none; color:var(--text-dim, #888); font-size:18px; cursor:pointer;">&times;</button>
+        </div>
+
+        <p class="text-dim font-sm mb-3">
+          Assets for <strong>${escapeHtml(exportData.stash_name || 'Stash')}</strong> have been surgically unpacked from the vault into your local print directory.
+        </p>
+
+        <div style="background:var(--bg-main, #141418); border:1px solid var(--border-color, #2b2b36); border-radius:6px; padding:12px; margin-bottom:16px;">
+          <div class="text-dim font-xs mb-1 font-semibold">DESTINATION DIRECTORY</div>
+          <div class="font-mono text-main font-xs" style="word-break:break-all; user-select:all;" id="export-path-text">${escapeHtml(exportPath)}</div>
+        </div>
+
+        <div class="metrics-grid" style="grid-template-columns: 1fr 1fr; margin-bottom:20px;">
+          <div class="stat-card" style="padding:10px 14px;">
+            <div class="stat-label">Materialized Files</div>
+            <div class="stat-value font-mono" style="font-size:18px;">${totalFiles.toLocaleString()}</div>
+          </div>
+          <div class="stat-card" style="padding:10px 14px;">
+            <div class="stat-label">Unpacked Footprint</div>
+            <div class="stat-value font-mono" style="font-size:18px;">${formatBytes(totalBytes)}</div>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <button type="button" class="btn-pill" id="btn-copy-export-path" onclick="window.copyExportPath('${escapeHtml(exportPath.replace(/\\/g, '\\\\'))}')">
+            Copy Path
+          </button>
+          <button type="button" class="btn-pill btn-action-primary" onclick="window.closeExportSuccessModal()">
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+export function closeExportSuccessModal() {
+  const modal = document.getElementById('stash-export-success-modal');
+  if (modal) modal.remove();
+}
+
+export async function copyExportPath(textToCopy) {
+  const btn = document.getElementById('btn-copy-export-path');
+  try {
+    await navigator.clipboard.writeText(textToCopy);
+    if (btn) {
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.style.borderColor = '#10b981';
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.style.borderColor = '';
+      }, 2000);
+    }
+  } catch (err) {
+    const textEl = document.getElementById('export-path-text');
+    if (textEl) {
+      const range = document.createRange();
+      range.selectNodeContents(textEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+}
+
 function renderStashItemCard(item) {
   const typeBadgeClass = {
     model: 'badge-bundle',
@@ -295,9 +512,6 @@ function renderEmptyWorkspace() {
   `;
 }
 
-/**
- * Creates a new stash manifest from the sidebar form.
- */
 export async function handleCreateStash() {
   const nameInput = document.getElementById('new-stash-name');
   const makeActiveCheckbox = document.getElementById('new-stash-make-active');
@@ -327,9 +541,6 @@ export async function handleCreateStash() {
   }
 }
 
-/**
- * Sets the active stash manifest.
- */
 export async function handleSetActiveStash(stashId) {
   try {
     const res = await setActiveStash(stashId);
@@ -340,9 +551,6 @@ export async function handleSetActiveStash(stashId) {
   }
 }
 
-/**
- * Deletes a stash manifest (manifest-only deletion; original files untouched).
- */
 export async function handleDeleteStash(stashId, stashName) {
   if (!confirm(`Delete stash manifest "${stashName}"?\n\nThis will only delete the logical staging manifest. Downloaded models and original library files on disk will NEVER be touched.`)) {
     return;
@@ -359,15 +567,11 @@ export async function handleDeleteStash(stashId, stashName) {
   }
 }
 
-/**
- * Removes an individual line item from the currently opened stash manifest.
- */
 export async function handleRemoveStashItem(itemId) {
   try {
     await removeStashItem(itemId);
     if (currentSelectedStashId) {
       await loadStashDetail(currentSelectedStashId);
-      // Refresh sidebar metrics
       const stashesData = await fetchStashes();
       currentStashesList = stashesData.stashes || [];
       renderStashesSidebar();
@@ -378,3 +582,16 @@ export async function handleRemoveStashItem(itemId) {
     alert(`Failed to remove item: ${err.message}`);
   }
 }
+
+Object.assign(window, {
+  selectStash,
+  handleSetActiveStash,
+  handleDeleteStash,
+  handleRemoveStashItem,
+  handleCreateStash,
+  handleExportStash,
+  cancelExportTask,
+  closeExportSuccessModal,
+  closeExportProgressModal,
+  copyExportPath,
+});

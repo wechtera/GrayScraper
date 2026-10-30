@@ -1,10 +1,17 @@
+/**
+ * ui/static/js/views/models.js - Model catalog explorer, detail inspection modal,
+ * archive submodels viewer, and ephemeral 3D mesh rendering interface.
+ */
+
 import {
   fetchModels,
   fetchModelFiles,
   fetchModelDetail,
   fetchCreators,
   fetchArchiveSubmodels,
-  fetchRawArchiveTree
+  fetchRawArchiveTree,
+  getEphemeralRenderUrl,
+  renderModelView
 } from '../api.js';
 import { formatBytes, getFileExtension, renderStatusBadge, escapeHtml } from '../utils.js';
 
@@ -19,12 +26,127 @@ let currentArchiveData = null;
 let currentArchiveRawTree = null;
 let currentArchiveViewMode = 'logical';
 
+// Active ephemeral render lightbox state
+let activeEphemeralSourceType = null;
+let activeEphemeralId = null;
+let activeEphemeralTitle = '';
+let activeEphemeralBlobUrl = null;
+
 const ARCHIVE_EXTENSIONS = ['.zip', '.rar', '.7z'];
 
 function isArchiveFilename(filename) {
   if (!filename) return false;
   const lower = filename.toLowerCase();
   return ARCHIVE_EXTENSIONS.some(ext => lower.endsWith(ext));
+}
+
+function isStlFilename(filename) {
+  if (!filename) return false;
+  return filename.toLowerCase().endsWith('.stl');
+}
+
+/**
+ * Injects responsive CSS styles for the 6-view dropdowns and render lightbox.
+ */
+function ensureRenderStyles() {
+  if (document.getElementById('render-engine-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'render-engine-styles';
+  style.textContent = `
+    .render-dropdown-wrap {
+      position: relative;
+      display: inline-block;
+    }
+    .btn-render-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      background: #2a2a36;
+      border: 1px solid #3d3d4e;
+      color: #90caf9;
+    }
+    .btn-render-toggle:hover {
+      background: #363646;
+      border-color: #64b5f6;
+    }
+    .render-dropdown-menu {
+      display: none;
+      position: absolute;
+      right: 0;
+      top: calc(100% + 2px);
+      min-width: 155px;
+      background: #181822;
+      border: 1px solid #333344;
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+      z-index: 1200;
+      padding: 4px 0;
+    }
+    .render-dropdown-menu.show {
+      display: block;
+    }
+    .render-dropdown-item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 7px 12px;
+      font-size: 11px;
+      color: #d1d5db;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .render-dropdown-item:hover {
+      background: #28283a;
+      color: #60a5fa;
+    }
+    .model-view-pills-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .ephemeral-view-pills {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .ephemeral-view-pills .btn-pill.active {
+      background: #2563eb;
+      color: #ffffff;
+      border-color: #3b82f6;
+    }
+    .ephemeral-image-stage {
+      min-height: 440px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #111116;
+      border-radius: 8px;
+      border: 1px solid #242432;
+      overflow: hidden;
+      padding: 12px;
+    }
+    .ephemeral-image-stage img {
+      max-width: 100%;
+      max-height: 65vh;
+      object-fit: contain;
+      border-radius: 4px;
+    }
+  `;
+  document.head.appendChild(style);
+
+  // Global dismiss listener for render dropdown menus
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.render-dropdown-menu.show').forEach(el => el.classList.remove('show'));
+  });
 }
 
 export async function populateCreatorsFilter() {
@@ -52,6 +174,8 @@ export async function populateCreatorsFilter() {
 }
 
 export async function loadModels(page = currentModelPage) {
+  ensureRenderStyles();
+
   if (!creatorsLoaded) {
     await populateCreatorsFilter();
   }
@@ -181,7 +305,6 @@ export function renderModelCard(m) {
       </div>`
     : '';
 
-  // Local-first thumbnail with remote CDN fallback
   const localCoverSrc = `/previews/${m.id}/cover.jpg`;
   const remoteCoverFallback = m.primary_image_url || '';
 
@@ -217,7 +340,31 @@ export function renderModelCard(m) {
   `;
 }
 
+/**
+ * Builds the 6-view "Render ▾" dropdown HTML for any STL component or archive member.
+ */
+function renderSTLViewDropdown(sourceType, sourceId, title) {
+  const safeTitle = escapeHtml(title || 'Component').replace(/'/g, "\\'");
+  return `
+    <div class="render-dropdown-wrap" onclick="event.stopPropagation()">
+      <button type="button" class="btn-pill font-xs btn-render-toggle" onclick="window.toggleRenderDropdown(event, this)">
+        <span>Render</span> <span class="font-xs">&blacktriangledown;</span>
+      </button>
+      <div class="render-dropdown-menu">
+        <button type="button" class="render-dropdown-item" onclick="window.openEphemeralRenderModal('${sourceType}', ${sourceId}, 'front_left', '${safeTitle}')">Front-Left (3/4)</button>
+        <button type="button" class="render-dropdown-item" onclick="window.openEphemeralRenderModal('${sourceType}', ${sourceId}, 'front_right', '${safeTitle}')">Front-Right</button>
+        <button type="button" class="render-dropdown-item" onclick="window.openEphemeralRenderModal('${sourceType}', ${sourceId}, 'back_right', '${safeTitle}')">Back-Right</button>
+        <button type="button" class="render-dropdown-item" onclick="window.openEphemeralRenderModal('${sourceType}', ${sourceId}, 'back_left', '${safeTitle}')">Back-Left</button>
+        <button type="button" class="render-dropdown-item" onclick="window.openEphemeralRenderModal('${sourceType}', ${sourceId}, 'top_down', '${safeTitle}')">Top-Down</button>
+        <button type="button" class="render-dropdown-item" onclick="window.openEphemeralRenderModal('${sourceType}', ${sourceId}, 'bottom_up', '${safeTitle}')">Bottom-Up</button>
+      </div>
+    </div>
+  `;
+}
+
 export async function openModelDetailModal(modelId) {
+  ensureRenderStyles();
+
   const modal = document.getElementById('model-detail-modal');
   const titleEl = document.getElementById('model-detail-title');
   const subtitleEl = document.getElementById('model-detail-subtitle');
@@ -267,15 +414,27 @@ export async function openModelDetailModal(modelId) {
 
     const localCoverSrc = `/previews/${data.id}/cover.jpg`;
     const remoteCoverFallback = data.primary_image_url || '';
+    const isExternal = data.source === 'external' || data.id >= 2_000_000_000;
 
     bodyEl.innerHTML = `
       <div class="detail-split-layout">
         <div class="detail-col-left">
           <div class="detail-media-card">
             ${remoteCoverFallback
-              ? `<img src="${localCoverSrc}" onerror="this.onerror=null; this.src='${escapeHtml(remoteCoverFallback)}';" class="detail-full-thumb" alt="${escapeHtml(data.name)}">`
+              ? `<img id="detail-primary-preview-img" src="${localCoverSrc}" onerror="this.onerror=null; this.src='${escapeHtml(remoteCoverFallback)}';" class="detail-full-thumb" alt="${escapeHtml(data.name)}">`
               : '<div class="text-dim">No Preview Available</div>'
             }
+            ${isExternal ? `
+              <div class="model-view-pills-row">
+                <span class="text-dim font-xs mr-1">Views:</span>
+                <button type="button" class="btn-pill font-xs active" onclick="window.switchModelCoverView(${data.id}, 'front_left', this)">Front-L</button>
+                <button type="button" class="btn-pill font-xs" onclick="window.switchModelCoverView(${data.id}, 'front_right', this)">Front-R</button>
+                <button type="button" class="btn-pill font-xs" onclick="window.switchModelCoverView(${data.id}, 'back_right', this)">Back-R</button>
+                <button type="button" class="btn-pill font-xs" onclick="window.switchModelCoverView(${data.id}, 'back_left', this)">Back-L</button>
+                <button type="button" class="btn-pill font-xs" onclick="window.switchModelCoverView(${data.id}, 'top_down', this)">Top</button>
+                <button type="button" class="btn-pill font-xs" onclick="window.switchModelCoverView(${data.id}, 'bottom_up', this)">Bottom</button>
+              </div>
+            ` : ''}
           </div>
 
           <div class="detail-actions-card">
@@ -283,9 +442,11 @@ export async function openModelDetailModal(modelId) {
             <button type="button" class="btn-pill btn-full" onclick="window.openAddToStashModal({ item_type: 'model', model_id: ${data.id}, title: '${escapeHtml(data.name).replace(/'/g, "\\'")}', creator: '${escapeHtml(data.designer_name || 'Unknown').replace(/'/g, "\\'")}' })">
               + Add Model to Stash
             </button>
-            <a href="${data.url}" target="_blank" rel="noopener noreferrer" class="btn-pill btn-full">
-              View on MyMiniFactory &rarr;
-            </a>
+            ${data.url ? `
+              <a href="${data.url}" target="_blank" rel="noopener noreferrer" class="btn-pill btn-full">
+                View on MyMiniFactory &rarr;
+              </a>
+            ` : ''}
           </div>
 
           <div class="detail-box">
@@ -378,6 +539,7 @@ export async function openModelDetailModal(modelId) {
                   <th class="col-file-tier">Storage Tier</th>
                   <th class="col-file-link">Direct Link</th>
                   <th class="col-archive-action">Archive Inspection</th>
+                  <th>Render</th>
                   <th>Stash</th>
                 </tr>
               </thead>
@@ -390,7 +552,9 @@ export async function openModelDetailModal(modelId) {
                       : '<span class="status-badge status-not_downloaded">Pending</span>');
 
                   const isArchive = isArchiveFilename(f.filename);
+                  const isStl = isStlFilename(f.filename);
                   const canInspect = isArchive && (f.storage_tier === 'nas' || f.is_downloaded);
+                  const canRender = isStl && (f.storage_tier === 'nas' || f.is_downloaded);
 
                   return `
                     <tr>
@@ -411,11 +575,17 @@ export async function openModelDetailModal(modelId) {
                         }
                       </td>
                       <td>
+                        ${canRender
+                          ? renderSTLViewDropdown('file', f.file_id, f.filename)
+                          : '<span class="text-dim font-xs">-</span>'
+                        }
+                      </td>
+                      <td>
                         <button type="button" class="btn-pill font-xs" onclick="window.openAddToStashModal({ item_type: 'file', model_id: ${data.id}, file_id: ${f.file_id}, title: '${escapeHtml(f.filename || 'unnamed_file').replace(/'/g, "\\'")}' })">+ Stash</button>
                       </td>
                     </tr>
                   `;
-                }).join('') : '<tr><td colspan="7" class="td-empty">No separate files registered for this model.</td></tr>'}
+                }).join('') : '<tr><td colspan="8" class="td-empty">No separate files registered for this model.</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -437,6 +607,8 @@ export async function openModelDetailModal(modelId) {
 }
 
 export async function openFilesModal(modelId) {
+  ensureRenderStyles();
+
   const modal = document.getElementById('files-modal');
   const title = document.getElementById('files-modal-title');
   const subtitle = document.getElementById('files-modal-subtitle');
@@ -466,13 +638,16 @@ export async function openFilesModal(modelId) {
               <th class="col-file-tier">Status</th>
               <th class="col-file-link">Direct Link</th>
               <th class="col-archive-action">Archive Inspection</th>
+              <th>Render</th>
               <th>Stash</th>
             </tr>
           </thead>
           <tbody>
             ${data.files.map(f => {
               const isArchive = isArchiveFilename(f.filename);
+              const isStl = isStlFilename(f.filename);
               const canInspect = isArchive && f.is_downloaded;
+              const canRender = isStl && f.is_downloaded;
 
               return `
                 <tr>
@@ -490,6 +665,12 @@ export async function openFilesModal(modelId) {
                     ${canInspect
                       ? `<button type="button" class="btn-pill font-xs btn-inspect-archive" onclick="window.openArchiveViewerModal(${f.file_id})">Inspect Contents</button>`
                       : (isArchive ? '<span class="text-dim font-xs">Download to Peak</span>' : '<span class="text-dim font-xs">-</span>')
+                    }
+                  </td>
+                  <td>
+                    ${canRender
+                      ? renderSTLViewDropdown('file', f.file_id, f.filename)
+                      : '<span class="text-dim font-xs">-</span>'
                     }
                   </td>
                   <td>
@@ -512,6 +693,8 @@ export async function openFilesModal(modelId) {
 // -----------------------------------------------------------------------------
 
 export async function openArchiveViewerModal(fileId) {
+  ensureRenderStyles();
+
   activeArchiveFileId = fileId;
   currentArchiveViewMode = 'logical';
 
@@ -614,23 +797,49 @@ function renderLogicalSubmodelsView(container, data) {
     });
 
     const members = sm.members || [];
-    const membersListHtml = members.map(m => `
-      <div class="submodel-member-row">
-        <span class="badge badge-ext font-xs">${escapeHtml(m.file_extension ? m.file_extension.replace('.', '').toUpperCase() : 'FILE')}</span>
-        <span class="submodel-member-name font-mono" title="${escapeHtml(m.internal_path)}">${escapeHtml(m.filename)}</span>
-        <span class="submodel-member-size font-mono text-dim font-xs">${formatBytes(m.size_bytes)}</span>
-      </div>
-    `).join('');
+    const membersListHtml = members.map(m => {
+      const isStl = (m.file_extension || '').toLowerCase() === '.stl' || (m.filename || '').toLowerCase().endsWith('.stl');
+      return `
+        <div class="submodel-member-row flex items-center justify-between gap-2 py-1">
+          <div class="flex items-center gap-2 overflow-hidden">
+            <span class="badge badge-ext font-xs">${escapeHtml(m.file_extension ? m.file_extension.replace('.', '').toUpperCase() : 'FILE')}</span>
+            <span class="submodel-member-name font-mono truncate" title="${escapeHtml(m.internal_path)}">${escapeHtml(m.filename)}</span>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="submodel-member-size font-mono text-dim font-xs">${formatBytes(m.size_bytes)}</span>
+            ${isStl ? renderSTLViewDropdown('archive_member', m.id, m.filename) : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
 
     const previewSrc = sm.preview_image_path
       ? (sm.preview_image_path.startsWith('http') ? sm.preview_image_path : `/${sm.preview_image_path}`)
       : '';
 
+    // Identify candidate STL member to render if preview is missing
+    const candidateStlMember = (members || []).find(m => {
+      const ext = (m.file_extension || '').toLowerCase();
+      const fn = (m.filename || '').toLowerCase();
+      return (ext === '.stl' || fn.endsWith('.stl')) && !m.is_supported && !fn.includes('support');
+    }) || (members || []).find(m => {
+      const ext = (m.file_extension || '').toLowerCase();
+      const fn = (m.filename || '').toLowerCase();
+      return ext === '.stl' || fn.endsWith('.stl');
+    });
+
     const imgElement = previewSrc
       ? `<a href="${previewSrc}" target="_blank" rel="noopener noreferrer" class="submodel-thumb-link" title="Click to view full preview">
            <img src="${previewSrc}" class="submodel-thumb" loading="lazy" alt="${escapeHtml(sm.name)}">
          </a>`
-      : `<div class="submodel-no-thumb font-xs text-dim">No Preview Render</div>`;
+      : `<div class="submodel-no-thumb font-xs text-dim flex flex-col items-center justify-center p-3" id="submodel-thumb-container-${sm.id}">
+           <span>No Preview Render</span>
+           ${candidateStlMember ? `
+             <button type="button" class="btn-pill font-xs mt-2 btn-action-primary" onclick="window.triggerSubmodelRender(${sm.id}, ${candidateStlMember.id}, this)">
+               Render Preview
+             </button>
+           ` : ''}
+         </div>`;
 
     return `
       <div class="card submodel-card">
@@ -698,6 +907,7 @@ function renderRawArchiveTreeView(container, rawData) {
   const rowsHtml = entries.map((entry, idx) => {
     const ext = (entry.file_extension || '').toLowerCase();
     const isImage = IMAGE_EXTS.includes(ext);
+    const isStl = ext === '.stl' || (entry.filename || '').toLowerCase().endsWith('.stl');
 
     const cleanDiskName = (entry.filename || '').replace(/[^\w\-_\.]/g, '_');
     const imagePreviewUrl = `/previews/${modelId}/${fileId}/${cleanDiskName}`;
@@ -733,6 +943,12 @@ function renderRawArchiveTreeView(container, rawData) {
           ${escapeHtml(entry.submodel_name || '[Asset / Document]')}
         </td>
         <td>
+          ${isStl
+            ? renderSTLViewDropdown('archive_member', entry.id, entry.filename)
+            : '<span class="text-dim font-xs">-</span>'
+          }
+        </td>
+        <td>
           <button type="button" class="btn-pill font-xs" onclick="window.openAddToStashModal({
             item_type: 'archive_member',
             model_id: ${modelId},
@@ -757,6 +973,7 @@ function renderRawArchiveTreeView(container, rawData) {
             <th style="width:70px;">Type</th>
             <th style="width:100px;">Support</th>
             <th style="width:180px;">Assigned Submodel</th>
+            <th style="width:85px;">Render</th>
             <th style="width:75px;">Stash</th>
           </tr>
         </thead>
@@ -767,3 +984,266 @@ function renderRawArchiveTreeView(container, rawData) {
     </div>
   `;
 }
+
+// -----------------------------------------------------------------------------
+// Interactive 3D Mesh & Component Ephemeral Render Handlers
+// -----------------------------------------------------------------------------
+
+/**
+ * Toggles a 6-view "Render ▾" dropdown popup.
+ */
+export function toggleRenderDropdown(event, btn) {
+  event.stopPropagation();
+  const menu = btn.nextElementSibling;
+  const isAlreadyOpen = menu && menu.classList.contains('show');
+
+  document.querySelectorAll('.render-dropdown-menu.show').forEach(el => el.classList.remove('show'));
+
+  if (menu && !isAlreadyOpen) {
+    menu.classList.add('show');
+  }
+}
+
+/**
+ * Renders an inline preview on demand for an un-rendered submodel card.
+ */
+export async function triggerSubmodelRender(smId, memberId, btn) {
+  const container = document.getElementById(`submodel-thumb-container-${smId}`);
+  if (!container) return;
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Rendering...';
+  }
+
+  try {
+    const res = await fetch('/api/render/stl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_type: 'archive_member',
+        id: memberId,
+        view: 'front_left'
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    container.outerHTML = `
+      <a href="${objectUrl}" target="_blank" rel="noopener noreferrer" class="submodel-thumb-link" title="Rendered ephemeral preview">
+        <img src="${objectUrl}" class="submodel-thumb" alt="Rendered Submodel">
+      </a>
+    `;
+  } catch (err) {
+    console.error('Submodel render failed:', err);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Render Failed (Retry)';
+    }
+  }
+}
+
+/**
+ * Switches the perspective thumbnail of an external model in the Model Detail Modal.
+ */
+export async function switchModelCoverView(modelId, view, btn) {
+  const imgEl = document.getElementById('detail-primary-preview-img');
+  if (!imgEl) return;
+
+  const parentRow = btn ? btn.parentElement : null;
+  if (parentRow) {
+    parentRow.querySelectorAll('.btn-pill').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    btn.textContent = '...';
+  }
+
+  try {
+    const res = await renderModelView(modelId, view);
+    if (res && res.image_url) {
+      imgEl.src = `${res.image_url}?_t=${Date.now()}`;
+    }
+  } catch (err) {
+    alert(`Failed rendering view: ${err.message}`);
+  } finally {
+    if (parentRow && btn) {
+      const labelMap = {
+        front_left: 'Front-L',
+        front_right: 'Front-R',
+        back_right: 'Back-R',
+        back_left: 'Back-L',
+        top_down: 'Top',
+        bottom_up: 'Bottom'
+      };
+      btn.textContent = labelMap[view] || view;
+    }
+  }
+}
+
+/**
+ * Ensures the transient lightbox modal exists in document.body.
+ */
+function ensureEphemeralModalExists() {
+  if (document.getElementById('modal-ephemeral-render')) return;
+
+  const modalHtml = `
+    <div class="modal-backdrop" id="modal-ephemeral-render" style="display:none; z-index:9999;">
+      <div class="modal modal-lg" style="max-width:850px;">
+        <div class="modal-header">
+          <div>
+            <h2 class="modal-title-accent" id="ephemeral-render-title">Component 3D Render</h2>
+            <div class="modal-subtitle font-md" id="ephemeral-render-subtitle">Angle: Front-Left (3/4 Profile)</div>
+          </div>
+          <button type="button" class="tab-btn" onclick="window.closeEphemeralRenderModal()">Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="ephemeral-view-pills" id="ephemeral-pills-container">
+            <button type="button" class="btn-pill font-xs pill-view active" data-view="front_left" onclick="window.switchEphemeralView('front_left')">Front-Left (3/4)</button>
+            <button type="button" class="btn-pill font-xs pill-view" data-view="front_right" onclick="window.switchEphemeralView('front_right')">Front-Right</button>
+            <button type="button" class="btn-pill font-xs pill-view" data-view="back_right" onclick="window.switchEphemeralView('back_right')">Back-Right</button>
+            <button type="button" class="btn-pill font-xs pill-view" data-view="back_left" onclick="window.switchEphemeralView('back_left')">Back-Left</button>
+            <button type="button" class="btn-pill font-xs pill-view" data-view="top_down" onclick="window.switchEphemeralView('top_down')">Top-Down</button>
+            <button type="button" class="btn-pill font-xs pill-view" data-view="bottom_up" onclick="window.switchEphemeralView('bottom_up')">Bottom-Up</button>
+          </div>
+          <div class="ephemeral-image-stage" id="ephemeral-stage">
+            <div class="loading-placeholder">Initializing Blender preview stream...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+/**
+ * Opens the transient 6-view preview lightbox for any loose STL or internal archive member.
+ */
+export async function openEphemeralRenderModal(sourceType, sourceId, initialView = 'front_left', title = '') {
+  ensureRenderStyles();
+  ensureEphemeralModalExists();
+
+  activeEphemeralSourceType = sourceType;
+  activeEphemeralId = sourceId;
+  activeEphemeralTitle = title || 'Mesh Component';
+
+  const modal = document.getElementById('modal-ephemeral-render');
+  const titleEl = document.getElementById('ephemeral-render-title');
+
+  if (titleEl) {
+    titleEl.textContent = activeEphemeralTitle;
+  }
+  if (modal) modal.style.display = 'flex';
+
+  await switchEphemeralView(initialView);
+}
+
+export function closeEphemeralRenderModal() {
+  const modal = document.getElementById('modal-ephemeral-render');
+  if (modal) modal.style.display = 'none';
+
+  if (activeEphemeralBlobUrl) {
+    URL.revokeObjectURL(activeEphemeralBlobUrl);
+    activeEphemeralBlobUrl = null;
+  }
+}
+
+/**
+ * Switches camera angle within the ephemeral preview lightbox.
+ */
+export async function switchEphemeralView(viewName) {
+  const stage = document.getElementById('ephemeral-stage');
+  const subtitleEl = document.getElementById('ephemeral-render-subtitle');
+  const container = document.getElementById('ephemeral-pills-container');
+
+  const viewLabels = {
+    front_left: 'Front-Left (3/4 Profile)',
+    front_right: 'Front-Right Flank',
+    back_right: 'Back-Right Flank',
+    back_left: 'Back-Left Profile',
+    top_down: 'Top-Down Zenith',
+    bottom_up: 'Bottom-Up Nadir'
+  };
+
+  if (subtitleEl) {
+    subtitleEl.textContent = `Angle: ${viewLabels[viewName] || viewName}`;
+  }
+
+  if (container) {
+    container.querySelectorAll('.pill-view').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.view === viewName);
+    });
+  }
+
+  if (stage) {
+    stage.innerHTML = `
+      <div class="flex flex-col items-center justify-center gap-3">
+        <div class="loading-placeholder">Rendering ${viewLabels[viewName]} in Blender...</div>
+        <span class="text-dim font-xs">Extracting geometry into transient memory buffer</span>
+      </div>
+    `;
+  }
+
+  try {
+    const res = await fetch('/api/render/stl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_type: activeEphemeralSourceType,
+        id: activeEphemeralId,
+        view: viewName
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    if (activeEphemeralBlobUrl) {
+      URL.revokeObjectURL(activeEphemeralBlobUrl);
+    }
+
+    const blob = await res.blob();
+    activeEphemeralBlobUrl = URL.createObjectURL(blob);
+
+    if (stage) {
+      stage.innerHTML = `
+        <img src="${activeEphemeralBlobUrl}" alt="${escapeHtml(activeEphemeralTitle)} (${viewName})" />
+      `;
+    }
+  } catch (err) {
+    if (stage) {
+      stage.innerHTML = `
+        <div class="text-alert p-4 text-center">
+          <strong>Blender Render Error:</strong><br>
+          <span class="font-xs font-mono">${escapeHtml(err.message)}</span>
+        </div>
+      `;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Window Bindings for Global DOM Event Handlers
+// -----------------------------------------------------------------------------
+Object.assign(window, {
+  loadModels,
+  resetModelPageAndLoad,
+  changeModelPage,
+  filterByTag,
+  openModelDetailModal,
+  openFilesModal,
+  openArchiveViewerModal,
+  switchArchiveViewMode,
+  toggleRenderDropdown,
+  triggerSubmodelRender,
+  switchModelCoverView,
+  openEphemeralRenderModal,
+  closeEphemeralRenderModal,
+  switchEphemeralView
+});
